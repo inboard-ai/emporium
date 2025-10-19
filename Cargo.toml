@@ -1,0 +1,9 @@
+[package]
+name = "emporium"
+description = "WASM host and extension framework for Rust applications"
+version = "0.0.1"
+edition = "2024"
+authors = ["Andy Terra <tech@andyterra.com>"]
+license = "MIT"
+
+[dependencies]
