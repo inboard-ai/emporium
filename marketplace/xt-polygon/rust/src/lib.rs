@@ -101,7 +101,7 @@ impl WasiHttpClient {
         // Wait for response using WASI polling
         let pollable = future_response.subscribe();
         pollable.block();
-        
+
         let incoming_response = future_response
             .get()
             .ok_or_else(|| polygon::Error::Custom("Response not ready".to_string()))?
@@ -173,7 +173,7 @@ impl Internal {
         // Create Polygon client with WASI HTTP implementation
         let client = Polygon::with_client(WasiHttpClient).with_key(key);
 
-        log("info", "Initialized Polygon client with WASI HTTP");
+        log("info", &format!("Initialized Polygon client with WASI HTTP: {key}"));
         Self(client)
     }
 
@@ -240,8 +240,7 @@ impl exports::emporium::extensions::extension::GuestInstance for PolygonExtensio
 
     fn update(&self, command: String) -> Result<String, String> {
         // Parse command
-        let cmd: Command = serde_json::from_str(&command)
-            .map_err(|e| format!("Invalid command: {}", e))?;
+        let cmd: Command = serde_json::from_str(&command).map_err(|e| format!("Invalid command: {}", e))?;
 
         log("debug", &format!("Handling command: {:?}", cmd));
 
