@@ -18,7 +18,11 @@ tokio-stream = { version = "0.1.17", features = ["fs"] }
 toml = "0.9.8"
 wasmtime = "27.0"
 wasmtime-wasi = "27.0"
+wasmtime-wasi-http = "27.0"
 wit-bindgen = "0.35"
 
 [build-dependencies]
 wasmtime-component-util = "27.0"
+
+[dev-dependencies]
+dotenvy = "0.15"

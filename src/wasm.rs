@@ -13,6 +13,7 @@ use crate::data::{Id, Message, Response};
 pub(crate) struct State {
     table: wasmtime_wasi::ResourceTable,
     wasi: wasmtime_wasi::WasiCtx,
+    http: wasmtime_wasi_http::types::WasiHttpCtx,
 }
 
 // TODO: Arc not Clone?
@@ -20,6 +21,7 @@ pub(crate) struct State {
 pub struct Extension {
     id: Id,
     wasm_bytes: Vec<u8>,
+    config: String,
 }
 
 pub(crate) mod bindings {
@@ -45,6 +47,17 @@ impl wasmtime_wasi::WasiView for State {
     }
 }
 
+// Implement WasiHttpView for State to enable HTTP support
+impl wasmtime_wasi_http::types::WasiHttpView for State {
+    fn table(&mut self) -> &mut wasmtime_wasi::ResourceTable {
+        &mut self.table
+    }
+
+    fn ctx(&mut self) -> &mut wasmtime_wasi_http::types::WasiHttpCtx {
+        &mut self.http
+    }
+}
+
 // Implement the log function that extensions can call
 impl bindings::ExtensionWorldImports for State {
     fn log<'a, 'b>(
@@ -63,6 +76,12 @@ impl bindings::ExtensionWorldImports for State {
 }
 
 impl Extension {
+    /// Set the configuration JSON for the extension
+    pub fn with_config(mut self, config: String) -> Self {
+        self.config = config;
+        self
+    }
+
     /// Convert the extension into a sipper that emits responses.
     /// Returns (sipper, message_sender) where you send messages to the extension via the sender.
     pub fn into_sipper(self) -> (impl Sipper<(), Response>, mpsc::UnboundedSender<Message>) {
@@ -81,12 +100,16 @@ impl Extension {
             // Add WASI support
             wasmtime_wasi::add_to_linker_async(&mut linker).unwrap();
 
+            // Add WASI HTTP support
+            wasmtime_wasi_http::add_only_http_to_linker_async(&mut linker).unwrap();
+
             // Create WASI context
             let wasi = wasmtime_wasi::WasiCtxBuilder::new().inherit_stdio().build();
 
             let mut store = Store::new(&engine, State {
                 table: wasmtime_wasi::ResourceTable::new(),
                 wasi,
+                http: wasmtime_wasi_http::types::WasiHttpCtx::new(),
             });
 
             let bindings = bindings::ExtensionWorld::instantiate_async(&mut store, &component, &linker)
@@ -116,8 +139,8 @@ impl Extension {
             // Create an extension instance
             let instance = bindings.emporium_extensions_extension().instance();
 
-            // Create instance resource
-            let instance_resource = instance.call_new(&mut store, &"{}").await.unwrap();
+            // Create instance resource with config
+            let instance_resource = instance.call_new(&mut store, &self.config).await.unwrap();
 
             output
                 .send(Response(
@@ -180,7 +203,11 @@ pub async fn load(id: Id, path: std::path::PathBuf) -> Result<Extension, Error> 
     if wasm_path.exists() {
         let wasm_bytes = std::fs::read(wasm_path)?;
 
-        Ok(Extension { id, wasm_bytes })
+        Ok(Extension {
+            id,
+            wasm_bytes,
+            config: "{}".to_string(),
+        })
     } else {
         Err(Error::ExtensionNotFound(wasm_path.display().to_string()))
     }

@@ -98,14 +98,15 @@ impl WasiHttpClient {
         let future_response = outgoing_handler::handle(req, None)
             .map_err(|_| polygon::Error::Custom("Failed to send request".to_string()))?;
 
-        // Poll for response (blocking in this context)
-        let incoming_response = loop {
-            if let Some(result) = future_response.get() {
-                break result
-                    .map_err(|_| polygon::Error::Custom("Request failed".to_string()))?
-                    .map_err(|_| polygon::Error::Custom("HTTP error".to_string()))?;
-            }
-        };
+        // Wait for response using WASI polling
+        let pollable = future_response.subscribe();
+        pollable.block();
+        
+        let incoming_response = future_response
+            .get()
+            .ok_or_else(|| polygon::Error::Custom("Response not ready".to_string()))?
+            .map_err(|_| polygon::Error::Custom("Request failed".to_string()))?
+            .map_err(|_| polygon::Error::Custom("HTTP error".to_string()))?;
 
         let status = incoming_response.status();
 
@@ -176,32 +177,41 @@ impl Internal {
         Self(client)
     }
 
-    fn update(&self, cmd: Command) -> Result<String, String> {
+    async fn update(&self, cmd: Command) -> Result<String, String> {
+        use polygon::query::Execute;
+        use polygon::rest::raw;
+
         match cmd {
             Command::RelatedTickers { ticker } => {
-                // Use polygon crate's API
-                // For now, return a mock response since we'd need async context
-                // In production, you'd use the polygon client here
-                Ok(json!({
-                    "status": "OK",
-                    "ticker": ticker,
-                    "message": "Related tickers endpoint (implementation pending)"
-                })
-                .to_string())
+                // Use polygon's raw JSON API for related tickers
+                raw::tickers::related(&self.0, &ticker)
+                    .get()
+                    .await
+                    .map_err(|e| format!("Failed to get related tickers: {:?}", e))
             }
-            Command::ListTickers { limit, exchange } => Ok(json!({
-                "status": "OK",
-                "limit": limit.unwrap_or(10),
-                "exchange": exchange,
-                "message": "List tickers endpoint (implementation pending)"
-            })
-            .to_string()),
-            Command::TickerDetails { ticker } => Ok(json!({
-                "status": "OK",
-                "ticker": ticker,
-                "message": "Ticker details endpoint (implementation pending)"
-            })
-            .to_string()),
+            Command::ListTickers { limit, exchange } => {
+                // Build query for listing tickers
+                let mut query = raw::tickers::all(&self.0);
+
+                if let Some(limit) = limit {
+                    query = query.param("limit", limit);
+                }
+                if let Some(exchange) = exchange {
+                    query = query.param("exchange", exchange);
+                }
+
+                query
+                    .get()
+                    .await
+                    .map_err(|e| format!("Failed to list tickers: {:?}", e))
+            }
+            Command::TickerDetails { ticker } => {
+                // Use polygon's raw JSON API for ticker details
+                raw::tickers::details(&self.0, &ticker)
+                    .get()
+                    .await
+                    .map_err(|e| format!("Failed to get ticker details: {:?}", e))
+            }
         }
     }
 }
@@ -230,12 +240,14 @@ impl exports::emporium::extensions::extension::GuestInstance for PolygonExtensio
 
     fn update(&self, command: String) -> Result<String, String> {
         // Parse command
-        let cmd: Command = serde_json::from_str(&command).map_err(|e| format!("Invalid command: {}", e))?;
+        let cmd: Command = serde_json::from_str(&command)
+            .map_err(|e| format!("Invalid command: {}", e))?;
 
         log("debug", &format!("Handling command: {:?}", cmd));
 
-        // Handle the command
-        self.0.borrow().update(cmd)
+        // Handle the command - block on the async call
+        // The host handles this asynchronously even though we block here
+        futures::executor::block_on(self.0.borrow().update(cmd))
     }
 
     fn view(&self) -> String {

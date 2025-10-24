@@ -12,7 +12,10 @@ crate-type = ["cdylib"]
 wit-bindgen = "0.35"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-polygon = { version = "0.1", default-features = false, features = ["decoder"] }
+polygon = { git = "https://github.com/inboard-ai/polygon.git", default-features = false, features = [
+    "decoder",
+] }
+futures = "0.3"
 
 [package.metadata.component]
 package = "extension:api"
@@ -20,5 +23,5 @@ package = "extension:api"
 [package.metadata.component.target]
 path = "../../../wit" # path to inboard extension API WIT
 
-[patch.crates-io]
-polygon = { path = "../../../../polygon" }
+# [patch.crates-io]
+# polygon = { path = "../../../../polygon" }

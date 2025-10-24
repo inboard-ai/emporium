@@ -1,23 +1,17 @@
 #!/bin/bash
 set -e  # Exit on error
 
-# Build the Polygon extension in release mode
+# Build the Polygon extension using cargo-component
 echo "Building Polygon extension in release mode..."
-cargo build --target wasm32-unknown-unknown --release
-
-# Convert the WASM module to a component
-echo "Converting WASM module to component..."
-wasm-tools component new \
-    target/wasm32-unknown-unknown/release/emporium_polygon.wasm \
-    -o target/wasm32-unknown-unknown/release/emporium_polygon_component.wasm
+cargo component build --release
 
 # Create extension directory if it doesn't exist
-EXTENSION_DIR="../../build/emporium_polygon"
+EXTENSION_DIR="../../build/xt-polygon"
 mkdir -p "$EXTENSION_DIR"
 
 # Copy the WASM component and manifest to the extension directory
 echo "Installing extension..."
-cp target/wasm32-unknown-unknown/release/emporium_polygon_component.wasm "$EXTENSION_DIR/emporium_polygon.wasm"
+cp target/wasm32-wasip1/release/xt_polygon.wasm "$EXTENSION_DIR/xt_polygon.wasm"
 cp manifest.toml "$EXTENSION_DIR/manifest.toml"
 
-echo "Build complete! Extension available at: $EXTENSION_DIR/emporium_polygon.wasm"
+echo "Build complete! Extension available at: $EXTENSION_DIR/xt_polygon.wasm"
