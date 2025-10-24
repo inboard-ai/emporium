@@ -54,9 +54,7 @@ impl Registry {
     /// Send a message to a specific extension
     pub fn send_message(&self, extension_id: &Id, message: Message) -> Result<(), Error> {
         if let Some(sender) = self.extensions.get(extension_id) {
-            sender
-                .unbounded_send(message)
-                .map_err(|_| Error::RegistrySendFailed("Failed to send message".to_string()))
+            sender.unbounded_send(message).map_err(|e| Error::SendError(e))
         } else {
             Err(Error::RegistryNotFound(format!("Extension {} not found", extension_id)))
         }

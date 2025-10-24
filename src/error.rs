@@ -1,5 +1,7 @@
 //! Error types
 
+use crate::Message;
+use futures::channel::mpsc::TrySendError;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -12,14 +14,16 @@ pub enum Error {
     RegistryNotFound(String),
     #[error("AlreadyExists: {0}")]
     RegistryAlreadyExists(String),
-    #[error("SendFailed: {0}")]
-    RegistrySendFailed(String),
+    #[error("SendError: {0}")]
+    SendError(TrySendError<Message>),
     #[error("Extension not found: {0}")]
     ExtensionNotFound(String),
     #[error("Extension load error: {0}")]
     ExtensionLoadError(String),
     #[error("Manifest error: {0}")]
     ManifestError(ManifestError),
+    #[error("{0}")]
+    Custom(String),
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -45,5 +49,23 @@ impl From<wasmtime::Error> for Error {
 impl From<ManifestError> for Error {
     fn from(err: ManifestError) -> Self {
         Error::ManifestError(err)
+    }
+}
+
+impl From<TrySendError<Message>> for Error {
+    fn from(err: TrySendError<Message>) -> Self {
+        Error::SendError(err)
+    }
+}
+
+impl From<String> for Error {
+    fn from(err: String) -> Self {
+        Error::Custom(err)
+    }
+}
+
+impl From<&str> for Error {
+    fn from(err: &str) -> Self {
+        Error::Custom(err.to_string())
     }
 }
