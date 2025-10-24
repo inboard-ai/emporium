@@ -1,0 +1,48 @@
+# Polygon.io Extension Manifest
+# Market data extension using polygon.io REST API
+
+[extension]
+id = "polygon"
+name = "Polygon.io Market Data"
+version = "0.1.0"
+description = "Access real-time and historical market data from Polygon.io. Supports stocks, options, forex, and crypto data."
+author = "Andy Terra"
+company = "inboard AI"
+license = "MIT"
+
+# WASM component entry point
+[component]
+entry = "emporium_polygon.wasm"
+world = "polygon-provider"
+
+# Configuration schema for instances
+[config]
+schema = '''
+{
+  "type": "object",
+  "properties": {
+    "api_key": {
+      "type": "string",
+      "description": "Polygon.io API key"
+    },
+    "base_url": {
+      "type": "string",
+      "description": "Base URL for Polygon API",
+      "default": "https://api.polygon.io"
+    }
+  },
+  "required": ["api_key"]
+}
+'''
+
+# Available operations
+[operations]
+get_ticker = "Get latest ticker data"
+get_quote = "Get real-time quote"
+get_aggregates = "Get aggregate bars for a stock"
+list_tickers = "List available tickers"
+required = false
+
+# Extension capabilities
+[capabilities]
+network = true  # Needs network access for API calls
