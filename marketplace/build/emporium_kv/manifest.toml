@@ -1,0 +1,60 @@
+# KV Extension Manifest
+# Resource-based Key-Value store extension
+# Each instance maintains its own isolated state
+
+[extension]
+id = "kv"
+name = "Key-Value Store"
+version = "0.1.0"
+description = "A resource-based key-value store with instance-specific state. Each instance maintains its own isolated HashMap."
+author = "Andy Terra"
+company = "inboard AI"
+license = "MIT"
+
+# WASM component entry point
+[component]
+entry = "emporium_kv.wasm"
+world = "kv-provider"
+
+# Configuration schema for instances
+[config]
+schema = '''
+{
+  "type": "object",
+  "properties": {
+    "initial_data": {
+      "type": "object",
+      "description": "Initial key-value pairs to populate the store",
+      "additionalProperties": {
+        "type": "string"
+      }
+    }
+  }
+}
+'''
+
+# Resource capabilities
+[resources]
+# This extension exports a 'store' resource
+store = "emporium:kv/kv-store/store"
+
+# Available operations through the KV-specific API
+[operations]
+get = "Retrieve a value by key"
+get_all = "Retrieve all key-value pairs"
+set = "Store a key-value pair"
+delete = "Delete a key"
+clear = "Clear all entries"
+stats = "Get store statistics"
+required = false
+
+# Extension capabilities
+[capabilities]
+storage = true
+networking = true
+events = true
+
+# Dependencies
+[dependencies]
+runtime = "wasmtime"
+minimum_version = "0.1.0"

@@ -1,0 +1,40 @@
+// Simple extension interface for Emporium
+package emporium:extensions@0.1.0;
+
+interface types {
+    // Basic metadata every extension must provide
+    record metadata {
+        id: string,
+        name: string,
+        version: string,
+        description: string,
+    }
+}
+
+interface extension {
+    use types.{metadata};
+    
+    // Extension resource - each instance has its own state
+    resource instance {
+        // Create instance with optional JSON config
+        new: static func(config: string) -> instance;
+        
+        // Handle a command string, return either an event or error
+        update: func(command: string) -> result<string, string>;
+        
+        // Get current state info as JSON (for debugging)
+        view: func() -> string;
+    }
+    
+    // Static function to get extension metadata
+    get-metadata: func() -> metadata;
+}
+
+// The world that extensions implement
+world extension-world {
+    // Extensions can log messages for debugging
+    import log: func(level: string, message: string);
+    
+    // Export the extension interface
+    export extension;
+}

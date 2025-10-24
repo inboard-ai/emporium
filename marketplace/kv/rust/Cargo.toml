@@ -1,0 +1,21 @@
+[package]
+name = "emporium-kv"
+description = "Key-Value extension"
+version = "0.1.0"
+edition = "2024"
+authors = ["Andy Terra <andy@andyterra.com>"]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.35"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+decoder = "0.0.3"
+
+[package.metadata.component]
+package = "extension:api"
+
+[package.metadata.component.target]
+path = "../../../wit" # path to inboard extension API WIT
