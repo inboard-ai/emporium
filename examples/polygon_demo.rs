@@ -18,7 +18,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (sipper, msg_tx) = polygon.into_sipper();
 
-    // Spawn task to collect responses
     let response_task = tokio::spawn(async move {
         let mut sipper = Box::pin(sipper);
         let mut responses = Vec::new();
@@ -27,9 +26,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         responses
     });
-
-    // Skip metadata and ready events
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     // Send command to get related tickers for AAPL
     let command = json!({

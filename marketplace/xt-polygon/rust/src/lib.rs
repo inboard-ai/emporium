@@ -169,11 +169,25 @@ struct PolygonExtension(RefCell<Internal>);
 struct Internal(Polygon<WasiHttpClient>);
 
 impl Internal {
-    fn init(key: &str) -> Self {
-        // Create Polygon client with WASI HTTP implementation
-        let client = Polygon::with_client(WasiHttpClient).with_key(key);
+    fn init(config: &str) -> Self {
+        // Parse config to extract api_key
+        #[derive(Deserialize)]
+        struct Config {
+            api_key: String,
+        }
 
-        log("info", &format!("Initialized Polygon client with WASI HTTP: {key}"));
+        let parsed_config: Config = serde_json::from_str(config).expect("Failed to parse config JSON");
+
+        // Create Polygon client with WASI HTTP implementation
+        let client = Polygon::with_client(WasiHttpClient).with_key(&parsed_config.api_key);
+
+        log(
+            "info",
+            &format!(
+                "Initialized Polygon client with WASI HTTP using API key: {}...",
+                &parsed_config.api_key[..3.min(parsed_config.api_key.len())]
+            ),
+        );
         Self(client)
     }
 
