@@ -12,7 +12,7 @@ license = "MIT"
 
 # WASM component entry point
 [component]
-entry = "emporium_polygon.wasm"
+entry = "xt_polygon.wasm"
 world = "polygon-provider"
 
 # Configuration schema for instances
@@ -45,4 +45,4 @@ required = false
 
 # Extension capabilities
 [capabilities]
-network = true  # Needs network access for API calls
+network = true # Needs network access for API calls

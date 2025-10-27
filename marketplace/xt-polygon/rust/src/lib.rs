@@ -11,7 +11,6 @@ use exports::emporium::extensions::extension::{Guest, Instance, Metadata};
 use serde::Deserialize;
 use serde_json::json;
 use std::cell::RefCell;
-use std::future::Future;
 
 use polygon;
 use polygon::{Polygon, Request, Response};
@@ -45,15 +44,15 @@ impl Request for WasiHttpClient {
         WasiHttpClient
     }
 
-    fn get(&self, url: &str) -> impl Future<Output = Result<Self::Response, polygon::Error>> + Send {
+    async fn get(&self, url: &str) -> Result<Self::Response, polygon::Error> {
         let url = url.to_string();
-        async move { Self::make_http_request(&url, Method::Get, None).await }
+        Self::make_http_request(&url, Method::Get, None).await
     }
 
-    fn post(&self, url: &str, body: &str) -> impl Future<Output = Result<Self::Response, polygon::Error>> + Send {
+    async fn post(&self, url: &str, body: &str) -> Result<Self::Response, polygon::Error> {
         let url = url.to_string();
         let body = body.to_string();
-        async move { Self::make_http_request(&url, Method::Post, Some(&body)).await }
+        Self::make_http_request(&url, Method::Post, Some(&body)).await
     }
 }
 

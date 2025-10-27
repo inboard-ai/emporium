@@ -3,3 +3,5 @@
 docs/
 Cargo.lock
 .env
+
+.*.md
