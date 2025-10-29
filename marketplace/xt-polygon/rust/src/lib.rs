@@ -1,6 +1,8 @@
 //! Polygon.io market data extension using WASI HTTP and the polygon crate
 #![allow(unsafe_op_in_unsafe_fn)]
 
+mod command;
+
 wit_bindgen::generate!({
     path: "./wit",
     world: "extension-world",
@@ -13,9 +15,9 @@ use serde_json::json;
 use std::cell::RefCell;
 
 use polygon;
-use polygon::{Polygon, Request, Response};
+use polygon::{Polygon, Request};
 
-// Import WASI HTTP types
+// WASI HTTP types
 use wasi::http::outgoing_handler;
 use wasi::http::types::*;
 
@@ -25,15 +27,20 @@ struct WasiHttpClient;
 pub struct HttpResponse {
     status: u16,
     body: String,
+    request_id: Option<String>,
 }
 
-impl Response for HttpResponse {
+impl polygon::Response for HttpResponse {
     fn status(&self) -> u16 {
         self.status
     }
 
-    fn body(self) -> String {
-        self.body
+    fn body(&self) -> &str {
+        &self.body
+    }
+
+    fn request_id(&self) -> &Option<String> {
+        &self.request_id
     }
 }
 
@@ -56,8 +63,10 @@ impl Request for WasiHttpClient {
     }
 }
 
+// TODO: Move this out of the struct, into a separate crate-level `http.rs` module.
 impl WasiHttpClient {
     async fn make_http_request(url: &str, method: Method, body: Option<&str>) -> Result<HttpResponse, polygon::Error> {
+        log("debug", &format!("Making HTTP request to {url}"));
         // Parse URL to extract components (https://api.polygon.io/path)
         let url_parts: Vec<&str> = url.splitn(3, '/').collect();
         if url_parts.len() < 3 {
@@ -109,6 +118,20 @@ impl WasiHttpClient {
 
         let status = incoming_response.status();
 
+        // Try to extract request ID from headers
+        let headers = incoming_response.headers();
+        let request_id = headers
+            .get(&"x-request-id".to_string())
+            .first()
+            .and_then(|value| String::from_utf8(value.clone()).ok())
+            .or_else(|| {
+                // Polygon.io might use a different header name
+                headers
+                    .get(&"x-trace-id".to_string())
+                    .first()
+                    .and_then(|value| String::from_utf8(value.clone()).ok())
+            });
+
         // Read response body
         let body_stream = incoming_response
             .consume()
@@ -137,28 +160,25 @@ impl WasiHttpClient {
         Ok(HttpResponse {
             status: status as u16,
             body,
+            request_id,
         })
     }
 }
 
-// Main component
-struct Component;
+// Main extension component wrapper
+struct Wrapper;
 
-// Commands that can be sent to the polygon extension
-#[derive(Debug, Deserialize)]
-#[serde(tag = "method", rename_all = "snake_case")]
-enum Command {
-    /// Get related tickers
-    RelatedTickers { ticker: String },
-    /// List all tickers with optional params
-    ListTickers {
-        #[serde(default)]
-        limit: Option<u32>,
-        #[serde(default)]
-        exchange: Option<String>,
-    },
-    /// Get ticker details
-    TickerDetails { ticker: String },
+impl Guest for Wrapper {
+    type Instance = PolygonExtension;
+
+    fn get_metadata() -> Metadata {
+        Metadata {
+            id: "polygon".to_string(),
+            name: "Polygon.io Market Data".to_string(),
+            version: "0.1.0".to_string(),
+            description: "Access real-time and historical market data from Polygon.io".to_string(),
+        }
+    }
 }
 
 // Wrapper for the Polygon extension
@@ -178,7 +198,9 @@ impl Internal {
         let parsed_config: Config = serde_json::from_str(config).expect("Failed to parse config JSON");
 
         // Create Polygon client with WASI HTTP implementation
-        let client = Polygon::with_client(WasiHttpClient).with_key(&parsed_config.api_key);
+        let client = Polygon::default()
+            .with_client(WasiHttpClient)
+            .with_key(&parsed_config.api_key);
 
         log(
             "info",
@@ -190,59 +212,18 @@ impl Internal {
         Self(client)
     }
 
-    async fn update(&self, cmd: Command) -> Result<String, String> {
-        use polygon::query::Execute;
-        use polygon::rest::raw;
+    async fn handle_command(&self, command: String) -> Result<String, String> {
+        // Parse the command
+        let cmd: command::Command = serde_json::from_str(&command).map_err(|e| format!("Invalid command: {}", e))?;
 
-        match cmd {
-            Command::RelatedTickers { ticker } => {
-                // Use polygon's raw JSON API for related tickers
-                raw::tickers::related(&self.0, &ticker)
-                    .get()
-                    .await
-                    .map_err(|e| format!("Failed to get related tickers: {:?}", e))
-            }
-            Command::ListTickers { limit, exchange } => {
-                // Build query for listing tickers
-                let mut query = raw::tickers::all(&self.0);
+        // Handle command and get response
+        let response = command::respond(&self.0, cmd).await;
 
-                if let Some(limit) = limit {
-                    query = query.param("limit", limit);
-                }
-                if let Some(exchange) = exchange {
-                    query = query.param("exchange", exchange);
-                }
-
-                query
-                    .get()
-                    .await
-                    .map_err(|e| format!("Failed to list tickers: {:?}", e))
-            }
-            Command::TickerDetails { ticker } => {
-                // Use polygon's raw JSON API for ticker details
-                raw::tickers::details(&self.0, &ticker)
-                    .get()
-                    .await
-                    .map_err(|e| format!("Failed to get ticker details: {:?}", e))
-            }
-        }
+        // Serialize the response
+        serde_json::to_string(&response).map_err(|e| format!("Failed to serialize response: {}", e))
     }
 }
 
-impl Guest for Component {
-    type Instance = PolygonExtension;
-
-    fn get_metadata() -> Metadata {
-        Metadata {
-            id: "polygon".to_string(),
-            name: "Polygon.io Market Data".to_string(),
-            version: "0.1.0".to_string(),
-            description: "Access real-time and historical market data from Polygon.io".to_string(),
-        }
-    }
-}
-
-// Implement the resource instance methods
 impl exports::emporium::extensions::extension::GuestInstance for PolygonExtension {
     fn new(config: String) -> Instance {
         log("info", "Creating new Polygon extension instance");
@@ -252,24 +233,17 @@ impl exports::emporium::extensions::extension::GuestInstance for PolygonExtensio
     }
 
     fn update(&self, command: String) -> Result<String, String> {
-        // Parse command
-        let cmd: Command = serde_json::from_str(&command).map_err(|e| format!("Invalid command: {}", e))?;
-
-        log("debug", &format!("Handling command: {:?}", cmd));
-
-        // Handle the command - block on the async call
-        // The host handles this asynchronously even though we block here
-        futures::executor::block_on(self.0.borrow().update(cmd))
+        // Just pass through to the async handler
+        futures::executor::block_on(self.0.borrow().handle_command(command))
     }
 
     fn view(&self) -> String {
         // let internal = self.0.borrow();
         json!({
             "type": "polygon_extension_info",
-            // "initialized": format!("{:?}", internal.client),
         })
         .to_string()
     }
 }
 
-export!(Component);
+export!(Wrapper);

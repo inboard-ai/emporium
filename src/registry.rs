@@ -1,12 +1,12 @@
 //! Manage extensions and send them messages.
-use crate::{Error, Extension, Id, Message, Response};
+use crate::{Command, Error, Extension, Id, Response};
 use futures::channel::mpsc;
 use futures::{Stream, StreamExt};
 use std::collections::HashMap;
 
 pub struct Registry {
     /// Loaded extensions
-    extensions: HashMap<Id, mpsc::UnboundedSender<Message>>,
+    extensions: HashMap<Id, mpsc::UnboundedSender<Command>>,
     /// Event sender that extensions use
     event_tx: mpsc::UnboundedSender<(Id, Response)>,
     /// Event receiver that extensions use
@@ -34,7 +34,7 @@ impl Registry {
         }
 
         // Create the sipper
-        let (sipper, msg_tx) = extension.into_sipper();
+        let sipper = extension.into_sipper();
 
         // Forward events from this extension to the registry's event stream
         let ext_id = id.clone();
@@ -47,12 +47,11 @@ impl Registry {
             sipper.await;
         });
 
-        self.extensions.insert(id, msg_tx);
         Ok(())
     }
 
     /// Send a message to a specific extension
-    pub fn send_message(&self, extension_id: &Id, message: Message) -> Result<(), Error> {
+    pub fn send_message(&self, extension_id: &Id, message: Command) -> Result<(), Error> {
         if let Some(sender) = self.extensions.get(extension_id) {
             sender.unbounded_send(message).map_err(|e| Error::SendError(e))
         } else {

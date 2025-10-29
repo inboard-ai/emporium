@@ -1,6 +1,6 @@
 use emporium::*;
+use futures::StreamExt;
 use serde_json::json;
-use sipper::StreamExt;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -10,40 +10,74 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Load the polygon extension
     let extension_path =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("marketplace/build/xt-polygon/xt_polygon.wasm");
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("marketplace/build/xt-polygon/extension.wasm");
 
-    let polygon = wasm::load("polygon".to_string(), extension_path)
-        .await?
-        .with_config(json!({ "api_key": api_key }).to_string());
+    let config = json!({
+        "api_key": api_key,
+        "base_url": "https://api.polygon.io"
+    })
+    .to_string();
 
-    let (sipper, msg_tx) = polygon.into_sipper();
+    let polygon = wasm::load("polygon".to_string(), config, extension_path).await?;
 
-    let response_task = tokio::spawn(async move {
-        let mut sipper = Box::pin(sipper);
-        let mut responses = Vec::new();
-        while let Some(resp) = sipper.next().await {
-            responses.push(resp);
+    // Create the sipper
+    let mut sipper = Box::pin(polygon.into_sipper());
+    let mut sender = None;
+
+    // Process initial events until we get Connected
+    while let Some(response) = sipper.next().await {
+        match response {
+            Response::Connected(msg_tx) => {
+                println!("✓ Extension connected");
+                sender = Some(msg_tx);
+                break; // Got sender, can proceed
+            }
+            Response::Metadata { id, name, version, .. } => {
+                println!("✓ Loaded: {} {} v{}", id, name, version);
+            }
+            _ => {}
         }
-        responses
-    });
-
-    // Send command to get related tickers for AAPL
-    let command = json!({
-        "method": "related_tickers",
-        "ticker": "AAPL"
-    });
-    msg_tx.unbounded_send(Message(command.to_string()))?;
-
-    // Close sender
-    drop(msg_tx);
-
-    // Wait for response
-    let responses = response_task.await?;
-
-    // Print the result (skip metadata and ready events)
-    for resp in responses.iter().skip(2) {
-        println!("{}", resp.0);
     }
+
+    // Send command to get related tickers
+    if let Some(tx) = sender {
+        let command = json!({
+            "method": "related_tickers",
+            "ticker": "AAPL"
+        });
+
+        println!("→ Sending command: {}", command);
+        tx.unbounded_send(Command(command.to_string()))?;
+
+        // Get the response
+        if let Some(response) = sipper.next().await {
+            match response {
+                Response::Data(json_str) => {
+                    println!("← Response received:");
+
+                    // Pretty print the JSON
+                    if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                        println!("{}", serde_json::to_string_pretty(&json_val)?);
+                    } else {
+                        println!("{}", json_str);
+                    }
+                }
+                Response::Error(err) => {
+                    eprintln!("✗ Error: {}", err);
+                }
+                _ => {}
+            }
+        }
+
+        // Close the sender to cleanly shut down
+        drop(tx);
+    } else {
+        eprintln!("✗ Failed to get sender from extension");
+    }
+
+    // Drain remaining events
+    while let Some(_) = sipper.next().await {}
+    sipper.await;
 
     Ok(())
 }

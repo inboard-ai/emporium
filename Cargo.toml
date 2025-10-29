@@ -6,6 +6,9 @@ edition = "2024"
 authors = ["Andy Terra <tech@andyterra.com>"]
 license = "MIT"
 
+[workspace]
+members = [".", "examples/gui_example"]
+
 [dependencies]
 anyhow = "1.0"
 futures = { version = "0.3", default-features = false }
@@ -27,5 +30,5 @@ wasmtime-component-util = "27.0"
 [dev-dependencies]
 dotenvy = "0.15"
 
-[patch.crates-io]
-iced.git = "https://github.com/iced-rs/iced.git"
+# [patch.crates-io]
+# iced.git = "https://github.com/iced-rs/iced.git"

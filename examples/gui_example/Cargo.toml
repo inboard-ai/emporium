@@ -1,0 +1,27 @@
+[package]
+name = "gui_example"
+version = "0.0.1"
+edition = "2024"
+authors = ["Andy Terra <tech@andyterra.com>"]
+license = "MIT"
+publish = false
+
+[dependencies]
+emporium = { path = "../../" }
+polygon = { path = "../../../polygon", features = [
+    "reqwest",
+    "table",
+] } # for development
+# polygon = { version = "0.1", features = ["reqwest", "table"] }
+
+polars-core = { version = "0.44", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
+
+[dependencies.iced]
+# version = "0.14.0-dev"
+git = "https://github.com/iced-rs/iced.git"
+# branch = "master"
+rev = "55da2a56b79d0cf0083499ce654db2b963fe5b49"
+features = ["tokio", "sipper"]

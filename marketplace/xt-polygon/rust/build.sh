@@ -11,7 +11,7 @@ mkdir -p "$EXTENSION_DIR"
 
 # Copy the WASM component and manifest to the extension directory
 echo "Installing extension..."
-cp target/wasm32-wasip1/release/xt_polygon.wasm "$EXTENSION_DIR/xt_polygon.wasm"
+cp target/wasm32-wasip1/release/xt_polygon.wasm "$EXTENSION_DIR/extension.wasm"
 cp manifest.toml "$EXTENSION_DIR/manifest.toml"
 
-echo "Build complete! Extension available at: $EXTENSION_DIR/xt_polygon.wasm"
+echo "Build complete! Extension available at: $EXTENSION_DIR/extension.wasm"

@@ -8,7 +8,11 @@ use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store};
 
 use crate::Error;
-use crate::data::{Id, Message, Response};
+use crate::data::{Command, Id, Response};
+
+/// Public type aliases for easier consumer access
+pub type Sender = futures::channel::mpsc::UnboundedSender<Command>;
+pub type Receiver = futures::channel::mpsc::UnboundedReceiver<Command>;
 
 pub(crate) struct State {
     table: wasmtime_wasi::ResourceTable,
@@ -83,11 +87,11 @@ impl Extension {
     }
 
     /// Convert the extension into a sipper that emits responses.
-    /// Returns (sipper, message_sender) where you send messages to the extension via the sender.
-    pub fn into_sipper(self) -> (impl Sipper<(), Response>, mpsc::UnboundedSender<Message>) {
-        let (msg_tx, mut msg_rx): (mpsc::UnboundedSender<Message>, mpsc::UnboundedReceiver<Message>) =
-            mpsc::unbounded();
-        let sipper = sipper(move |mut output| async move {
+    /// The sipper will first emit a Connected response with a message sender.
+    pub fn into_sipper(self) -> impl Sipper<(), Response> {
+        let (msg_tx, mut msg_rx): (Sender, Receiver) = mpsc::unbounded();
+
+        sipper(move |mut output| async move {
             let mut config = wasmtime::Config::new();
             config.async_support(true);
             let engine = Engine::new(&config).unwrap();
@@ -106,11 +110,14 @@ impl Extension {
             // Create WASI context
             let wasi = wasmtime_wasi::WasiCtxBuilder::new().inherit_stdio().build();
 
-            let mut store = Store::new(&engine, State {
-                table: wasmtime_wasi::ResourceTable::new(),
-                wasi,
-                http: wasmtime_wasi_http::types::WasiHttpCtx::new(),
-            });
+            let mut store = Store::new(
+                &engine,
+                State {
+                    table: wasmtime_wasi::ResourceTable::new(),
+                    wasi,
+                    http: wasmtime_wasi_http::types::WasiHttpCtx::new(),
+                },
+            );
 
             let bindings = bindings::ExtensionWorld::instantiate_async(&mut store, &component, &linker)
                 .await
@@ -124,16 +131,12 @@ impl Extension {
                 .unwrap();
 
             output
-                .send(Response(
-                    serde_json::json!({
-                        "type": "metadata",
-                        "id": metadata.id,
-                        "name": metadata.name,
-                        "version": metadata.version,
-                        "description": metadata.description
-                    })
-                    .to_string(),
-                ))
+                .send(Response::Metadata {
+                    id: metadata.id,
+                    name: metadata.name,
+                    version: metadata.version,
+                    description: metadata.description,
+                })
                 .await;
 
             // Create an extension instance
@@ -142,56 +145,56 @@ impl Extension {
             // Create instance resource with config
             let instance_resource = instance.call_new(&mut store, &self.config).await.unwrap();
 
-            output
-                .send(Response(
-                    serde_json::json!({
-                        "type": "ready",
-                        "extension_id": self.id
-                    })
-                    .to_string(),
-                ))
-                .await;
+            // Send the Connected response with the message sender
+            output.send(Response::Connected(msg_tx.clone())).await;
 
             // Process messages
-            while let Some(msg) = msg_rx.next().await {
-                // Pass the message string directly to the extension
-                match instance.call_update(&mut store, instance_resource, &msg.0).await {
-                    Ok(Ok(response)) => {
-                        // Extension returned success - pass the string through
-                        output.send(Response(response)).await;
+            while let Some(cmd) = msg_rx.next().await {
+                // Serialize the command to JSON
+                let cmd_json = match serde_json::to_string(&cmd) {
+                    Ok(json) => json,
+                    Err(e) => {
+                        output
+                            .send(Response::Error(format!("Failed to serialize command: {}", e)))
+                            .await;
+                        continue;
+                    }
+                };
+
+                eprintln!("Processing command: {}", cmd_json);
+
+                // Pass the JSON string to the extension
+                match instance.call_update(&mut store, instance_resource, &cmd_json).await {
+                    Ok(Ok(response_json)) => {
+                        // Try to deserialize the response as our Response enum
+                        match serde_json::from_str::<Response>(&response_json) {
+                            Ok(response) => {
+                                output.send(response).await;
+                            }
+                            Err(_) => {
+                                // Fallback for backwards compatibility - treat as raw data
+                                output.send(Response::Data(response_json)).await;
+                            }
+                        }
                     }
                     Ok(Err(error)) => {
-                        // Extension returned an error - wrap it in error JSON
-                        output
-                            .send(Response(
-                                serde_json::json!({
-                                    "error": error
-                                })
-                                .to_string(),
-                            ))
-                            .await;
+                        // Extension returned an error
+                        output.send(Response::Error(error)).await;
                     }
                     Err(e) => {
                         // WASM runtime error
-                        output
-                            .send(Response(
-                                serde_json::json!({
-                                    "error": format!("Runtime error: {}", e)
-                                })
-                                .to_string(),
-                            ))
-                            .await;
+                        output.send(Response::Error(format!("Runtime error: {}", e))).await;
                     }
                 }
             }
-        });
 
-        (sipper, msg_tx)
+            eprintln!("Extension {} message loop ended", self.id);
+        })
     }
 }
 
 /// Load an extension by ID
-pub async fn load(id: Id, path: std::path::PathBuf) -> Result<Extension, Error> {
+pub async fn load(id: Id, config: String, path: std::path::PathBuf) -> Result<Extension, Error> {
     let wasm_path = if path.extension().and_then(|s| s.to_str()) == Some("wasm") {
         // Path is already pointing to a WASM file
         path.to_path_buf()
@@ -203,11 +206,7 @@ pub async fn load(id: Id, path: std::path::PathBuf) -> Result<Extension, Error> 
     if wasm_path.exists() {
         let wasm_bytes = std::fs::read(wasm_path)?;
 
-        Ok(Extension {
-            id,
-            wasm_bytes,
-            config: "{}".to_string(),
-        })
+        Ok(Extension { id, wasm_bytes, config })
     } else {
         Err(Error::ExtensionNotFound(wasm_path.display().to_string()))
     }

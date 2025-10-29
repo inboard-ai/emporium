@@ -1,6 +1,6 @@
 //! Error types
 
-use crate::Message;
+use crate::Command;
 use futures::channel::mpsc::TrySendError;
 use std::sync::Arc;
 
@@ -15,7 +15,7 @@ pub enum Error {
     #[error("AlreadyExists: {0}")]
     RegistryAlreadyExists(String),
     #[error("SendError: {0}")]
-    SendError(TrySendError<Message>),
+    SendError(TrySendError<Command>),
     #[error("Extension not found: {0}")]
     ExtensionNotFound(String),
     #[error("Extension load error: {0}")]
@@ -52,8 +52,8 @@ impl From<ManifestError> for Error {
     }
 }
 
-impl From<TrySendError<Message>> for Error {
-    fn from(err: TrySendError<Message>) -> Self {
+impl From<TrySendError<Command>> for Error {
+    fn from(err: TrySendError<Command>) -> Self {
         Error::SendError(err)
     }
 }
