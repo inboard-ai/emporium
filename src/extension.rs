@@ -53,6 +53,7 @@ fn scan_directory<'a>(
                 scan_directory(&path, current_depth + 1, max_depth, sender).await?;
             } else if path.file_name().and_then(|n| n.to_str()) == Some("manifest.toml") {
                 // Found a manifest file - try to parse it
+                eprintln!("Found manifest.toml at {}", path.display());
                 if let Ok(manifest) = parse_manifest(&path).await {
                     // Verify the wasm file exists
                     let extension_dir = path.parent().unwrap();
@@ -60,6 +61,8 @@ fn scan_directory<'a>(
 
                     if wasm_path.exists() {
                         sender.send((wasm_path, manifest)).await;
+                    } else {
+                        eprintln!("Wasm file not found at {}", wasm_path.display());
                     }
                 }
             }

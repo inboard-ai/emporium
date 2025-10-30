@@ -1,0 +1,48 @@
+# AlphaVantage Extension Manifest
+# Market data extension using AlphaVantage REST API
+
+[extension]
+id = "alphav"
+name = "AlphaVantage Market Data"
+version = "0.1.0"
+description = "Access real-time and historical market data from AlphaVantage. Supports stocks, forex, crypto data, and technical indicators."
+author = "Andy Terra"
+company = "inboard AI"
+license = "MIT"
+
+# WASM component entry point
+[component]
+entry = "xt_alphav.wasm"
+world = "alphav-provider"
+
+# Configuration schema for instances
+[config]
+schema = '''
+{
+  "type": "object",
+  "properties": {
+    "api_key": {
+      "type": "string",
+      "description": "AlphaVantage API key"
+    },
+    "base_url": {
+      "type": "string",
+      "description": "Base URL for AlphaVantage API",
+      "default": "https://www.alphavantage.co"
+    }
+  },
+  "required": ["api_key"]
+}
+'''
+
+# Available operations
+[operations]
+get_quote = "Get latest quote data"
+get_time_series = "Get time series data"
+get_technical_indicators = "Get technical indicators"
+search_symbol = "Search for symbols"
+required = false
+
+# Extension capabilities
+[capabilities]
+network = true # Needs network access for API calls
