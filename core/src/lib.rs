@@ -187,7 +187,7 @@ impl ToolResult {
                     Series::new(alias, values)
                 }
             };
-            columns_vec.push(Column::Series(series));
+            columns_vec.push(Column::Series(series.into()));
         }
 
         let dataframe = DataFrame::new(columns_vec)
