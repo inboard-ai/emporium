@@ -1,0 +1,13 @@
+[package]
+name = "emporium-core"
+description = "Core data types for the Emporium extension framework"
+version = "0.0.1"
+edition = "2024"
+authors = ["Andy Terra <tech@andyterra.com>"]
+license = "MIT"
+
+[dependencies]
+polars-core = { version = "0.44", default-features = false }
+serde = { version = "1.0.208", features = ["serde_derive"] }
+serde_json = "1.0.125"
+thiserror = "1.0.63"

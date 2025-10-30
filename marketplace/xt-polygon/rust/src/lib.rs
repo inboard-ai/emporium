@@ -214,7 +214,7 @@ impl Internal {
 
     async fn handle_command(&self, command: String) -> Result<String, String> {
         // Parse the command
-        let cmd: command::Command = serde_json::from_str(&command).map_err(|e| format!("Invalid command: {}", e))?;
+        let cmd = serde_json::from_str(&command).map_err(|e| format!("Invalid command: {}", e))?;
 
         // Handle command and get response
         let response = command::respond(&self.0, cmd).await;

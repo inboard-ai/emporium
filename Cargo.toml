@@ -7,10 +7,11 @@ authors = ["Andy Terra <tech@andyterra.com>"]
 license = "MIT"
 
 [workspace]
-members = [".", "examples/gui_example"]
+members = [".", "core", "examples/gui_example"]
 
 [dependencies]
 anyhow = "1.0"
+emporium-core = { path = "./core" }
 futures = { version = "0.3", default-features = false }
 polars-core = { version = "0.44", default-features = false }
 serde = { version = "1.0.208", features = ["serde_derive"] }
