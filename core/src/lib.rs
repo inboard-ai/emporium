@@ -53,12 +53,17 @@ pub type Id = String;
 #[serde(tag = "type", content = "payload")]
 pub enum Command {
     /// List all available tools the extension provides
-    ListTools,
+    ListTools {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        correlation_id: Option<String>,
+    },
 
     /// Get detailed information about a specific tool
     GetToolDetails {
         /// The tool identifier
         tool_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        correlation_id: Option<String>,
     },
 
     /// Execute a tool with the provided input
@@ -67,10 +72,50 @@ pub enum Command {
         tool_id: String,
         /// The tool input as a JSON value
         params: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        correlation_id: Option<String>,
     },
 
     /// Any custom command
-    Custom(String),
+    Custom {
+        command: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        correlation_id: Option<String>,
+    },
+}
+
+impl Command {
+    /// Create a ListTools command with optional correlation ID
+    pub fn list_tools(correlation_id: Option<String>) -> Self {
+        Self::ListTools { correlation_id }
+    }
+
+    /// Create a GetToolDetails command with optional correlation ID
+    pub fn get_tool_details(tool_id: String, correlation_id: Option<String>) -> Self {
+        Self::GetToolDetails {
+            tool_id,
+            correlation_id,
+        }
+    }
+
+    /// Create an ExecuteTool command with optional correlation ID
+    pub fn execute_tool(tool_id: String, params: serde_json::Value, correlation_id: Option<String>) -> Self {
+        Self::ExecuteTool {
+            tool_id,
+            params,
+            correlation_id,
+        }
+    }
+
+    /// Extract the correlation ID from any command variant
+    pub fn correlation_id(&self) -> Option<&String> {
+        match self {
+            Self::ListTools { correlation_id } => correlation_id.as_ref(),
+            Self::GetToolDetails { correlation_id, .. } => correlation_id.as_ref(),
+            Self::ExecuteTool { correlation_id, .. } => correlation_id.as_ref(),
+            Self::Custom { correlation_id, .. } => correlation_id.as_ref(),
+        }
+    }
 }
 
 /// Tool information provided by an extension
@@ -210,21 +255,29 @@ pub enum Response<E = CoreError> {
     },
 
     /// List of available tools
-    ToolList(Vec<ToolInfo>),
+    ToolList {
+        tools: Vec<ToolInfo>,
+        correlation_id: Option<String>,
+    },
 
     /// Detailed information about a specific tool
-    ToolDetails(ToolInfo),
+    ToolDetails {
+        tool_id: String,
+        tool_info: ToolInfo,
+        correlation_id: Option<String>,
+    },
 
     /// Result from tool execution
     #[serde(skip)]
     ToolResult {
         tool_id: String,
         result: Result<ToolResult, E>,
+        correlation_id: Option<String>,
     },
 
-    /// Generic data response (for backwards compatibility)
-    Data(String),
-
     /// Error response
-    Error(String),
+    Error {
+        message: String,
+        correlation_id: Option<String>,
+    },
 }

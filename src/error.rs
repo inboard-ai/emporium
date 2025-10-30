@@ -54,6 +54,12 @@ impl From<ManifestError> for Error {
     }
 }
 
+impl From<serde_json::Error> for Error {
+    fn from(err: serde_json::Error) -> Self {
+        Error::JsonError(Arc::new(err))
+    }
+}
+
 impl From<TrySendError<Command>> for Error {
     fn from(err: TrySendError<Command>) -> Self {
         Error::SendError(err)
@@ -72,11 +78,6 @@ impl From<&str> for Error {
     }
 }
 
-impl From<serde_json::Error> for Error {
-    fn from(err: serde_json::Error) -> Self {
-        Error::JsonError(Arc::new(err))
-    }
-}
 
 impl From<crate::data::CoreError> for Error {
     fn from(err: crate::data::CoreError) -> Self {

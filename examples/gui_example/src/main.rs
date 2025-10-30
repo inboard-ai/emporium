@@ -6,7 +6,7 @@ use iced::widget::{
 use iced::{Center, Element, Fill, Shrink, Task, Theme};
 use polars_core::prelude::*;
 
-use emporium::data::{Command, Response};
+use emporium::data::{Command, Event, Response, ToolResult};
 use emporium::{Error, Extension};
 
 pub fn main() -> iced::Result {
@@ -34,7 +34,7 @@ enum ViewData {
 #[derive(Debug, Clone)]
 enum Message {
     Loaded(Result<Extension, Error>),
-    Event(Response),
+    Event(Event),
     Evented,
     FetchTickers,
     DiscoverTools,
@@ -87,12 +87,12 @@ impl App {
                 self.status = "Error loading extension".to_string();
                 eprintln!("Error loading extension: {e}");
             }
-            Message::Event(response) => {
-                match response {
-                    Response::Connected(sender) => {
-                        self.sender = Some(sender);
-                        return Task::done(Message::FetchTickers);
-                    }
+            Message::Event(response) => match response {
+                Event::Connected(sender) => {
+                    self.sender = Some(sender);
+                    return Task::done(Message::FetchTickers);
+                }
+                Event::Core(core_response) => match core_response {
                     Response::Metadata {
                         id,
                         name,
@@ -106,8 +106,15 @@ impl App {
                         eprintln!("  Description: {}", description);
                         self.status = "Ready".to_string();
                     }
-                    Response::ToolList(tools) => {
-                        self.status = format!("Found {} tools", tools.len());
+                    Response::ToolList {
+                        tools,
+                        correlation_id,
+                    } => {
+                        self.status = format!(
+                            "Found {} tools (ref. {})",
+                            tools.len(),
+                            correlation_id.unwrap_or_default()
+                        );
 
                         let mut text = String::from("Available Tools\n");
                         text.push_str(&"=".repeat(50));
@@ -123,20 +130,31 @@ impl App {
                             text_editor::Content::with_text(&text),
                         );
                     }
-                    Response::ToolDetails(tool) => {
-                        self.status =
-                            format!("Tool details for '{}'", tool.name);
+                    Response::ToolDetails {
+                        tool_id,
+                        tool_info,
+                        correlation_id,
+                    } => {
+                        self.status = format!(
+                            "Tool details for '{} ({})'",
+                            tool_info.name, tool_id
+                        );
 
-                        let mut text = format!("Tool Details: {}\n", tool.name);
+                        let mut text =
+                            format!("Tool Details: {}\n", tool_info.name);
                         text.push_str(&"=".repeat(50));
-                        text.push_str(&format!("\n\nID: {}", tool.id));
+                        text.push_str(&format!("\n\nID: {}", tool_info.id));
+                        text.push_str(&format!(
+                            "\nCorrelation ID: {}",
+                            correlation_id.unwrap_or("-".to_string())
+                        ));
                         text.push_str(&format!(
                             "\nDescription: {}",
-                            tool.description
+                            tool_info.description
                         ));
                         text.push_str("\n\nSchema:\n");
                         text.push_str(
-                            &serde_json::to_string_pretty(&tool.schema)
+                            &serde_json::to_string_pretty(&tool_info.schema)
                                 .unwrap_or_default(),
                         );
 
@@ -144,193 +162,46 @@ impl App {
                             text_editor::Content::with_text(&text),
                         );
                     }
-                    Response::ToolResult { tool_id, result } => {
-                        self.status = format!("Result from '{}'", tool_id);
+                    Response::ToolResult {
+                        tool_id,
+                        result,
+                        correlation_id,
+                    } => match result {
+                        Ok(tool_result) => {
+                            self.status = format!(
+                                "Result from '{}' (ref. {})",
+                                tool_id,
+                                correlation_id.unwrap_or("-".to_string())
+                            );
 
-                        // Handle specific tool results
-                        if tool_id == "list_modules" {
-                            let mut text = String::from("API Modules\n");
-                            text.push_str(&"=".repeat(50));
-                            text.push('\n');
-
-                            if let Some(modules) = result.get("modules") {
-                                if let Some(module_array) = modules.as_array() {
-                                    self.status = format!(
-                                        "Found {} modules",
-                                        module_array.len()
+                            match tool_result {
+                                ToolResult::Text(text) => {
+                                    self.data = ViewData::Text(
+                                        text_editor::Content::with_text(&text),
                                     );
-                                    for module in module_array {
-                                        if let (Some(name), Some(desc)) = (
-                                            module
-                                                .get("name")
-                                                .and_then(|v| v.as_str()),
-                                            module
-                                                .get("description")
-                                                .and_then(|v| v.as_str()),
-                                        ) {
-                                            text.push_str(&format!(
-                                                "\n\n• {}\n  {}",
-                                                name, desc
-                                            ));
-                                        }
-                                    }
+                                }
+                                ToolResult::DataFrame(df) => {
+                                    self.data = ViewData::Table(df);
                                 }
                             }
-                            self.data = ViewData::Text(
-                                text_editor::Content::with_text(&text),
-                            );
-                        } else if tool_id == "call_endpoint" {
-                            // Check for ticker results
-                            if let Some(results) =
-                                result.get("results").and_then(|v| v.as_array())
-                            {
-                                // Ticker data response
-                                eprintln!("Found {} tickers", results.len());
-
-                                // Create vectors for each column
-                                let mut tickers = Vec::new();
-                                let mut names = Vec::new();
-                                let mut markets = Vec::new();
-                                let mut locales = Vec::new();
-                                let mut primary_exchanges = Vec::new();
-                                let mut types = Vec::new();
-                                let mut currencies = Vec::new();
-                                let mut actives = Vec::new();
-
-                                for item in results {
-                                    tickers.push(
-                                        item.get("ticker")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("")
-                                            .to_string(),
-                                    );
-                                    names.push(
-                                        item.get("name")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("")
-                                            .to_string(),
-                                    );
-                                    markets.push(
-                                        item.get("market")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("")
-                                            .to_string(),
-                                    );
-                                    locales.push(
-                                        item.get("locale")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("")
-                                            .to_string(),
-                                    );
-                                    primary_exchanges.push(
-                                        item.get("primary_exchange")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("")
-                                            .to_string(),
-                                    );
-                                    types.push(
-                                        item.get("type")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("")
-                                            .to_string(),
-                                    );
-                                    currencies.push(
-                                        item.get("currency_name")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("")
-                                            .to_string(),
-                                    );
-                                    actives.push(
-                                        item.get("active")
-                                            .and_then(|v| v.as_bool())
-                                            .unwrap_or(false),
-                                    );
-                                }
-
-                                // Create DataFrame from vectors
-                                let df = df![
-                                    "TICKER" => tickers,
-                                    "NAME" => names,
-                                    "MARKET" => markets,
-                                    "LOCALE" => locales,
-                                    "PRIMARY_EXCHANGE" => primary_exchanges,
-                                    "TYPE" => types,
-                                    "CURRENCY" => currencies,
-                                    "ACTIVE" => actives,
-                                ];
-
-                                if let Ok(dataframe) = df {
-                                    self.data = ViewData::Table(dataframe);
-                                    self.status = format!(
-                                        "Found {} tickers",
-                                        results.len()
-                                    );
-                                } else {
-                                    eprintln!("Failed to create DataFrame");
-                                    self.status =
-                                        "Error creating DataFrame".to_string();
-                                    self.data = ViewData::None;
-                                }
-                            } else {
-                                self.status =
-                                    "No ticker results found".to_string();
-                                self.data = ViewData::Text(
-                                    text_editor::Content::with_text(
-                                        "No results found",
-                                    ),
-                                );
-                            }
-                        } else if tool_id == "get_endpoint_schema" {
-                            // Schema is returned directly as the result
-                            self.status = "Schema retrieved".to_string();
-
-                            let mut text = String::from("Endpoint Schema\n");
-                            text.push_str(&"=".repeat(50));
-                            text.push_str("\n\n");
-                            text.push_str(
-                                &serde_json::to_string_pretty(&result)
-                                    .unwrap_or_default(),
-                            );
-
-                            self.data = ViewData::Text(
-                                text_editor::Content::with_text(&text),
-                            );
-                        } else {
-                            // Generic tool result - show as formatted JSON
-                            self.status = format!("Result from '{}'", tool_id);
-
-                            let mut text =
-                                format!("Tool Result: {}\n", tool_id);
-                            text.push_str(&"=".repeat(50));
-                            text.push_str("\n\n");
-                            text.push_str(
-                                &serde_json::to_string_pretty(&result)
-                                    .unwrap_or_default(),
-                            );
-
-                            self.data = ViewData::Text(
-                                text_editor::Content::with_text(&text),
-                            );
                         }
-                    }
-                    Response::Data(json_str) => {
-                        // Backwards compatibility - treat as raw JSON
-                        self.status = "Data received".to_string();
-
-                        let mut text = String::from("Raw Response Data\n");
-                        text.push_str(&"=".repeat(50));
-                        text.push_str("\n\n");
-                        text.push_str(&json_str);
-
-                        self.data = ViewData::Text(
-                            text_editor::Content::with_text(&text),
+                        Err(e) => {
+                            self.status =
+                                format!("Error from '{}': {}", tool_id, e);
+                        }
+                    },
+                    Response::Error {
+                        message,
+                        correlation_id,
+                    } => {
+                        self.status = format!(
+                            "Error: {} (ref. {})",
+                            message,
+                            correlation_id.unwrap_or_default()
                         );
                     }
-                    Response::Error(error) => {
-                        self.status = format!("Error: {}", error);
-                    }
-                }
-            }
+                },
+            },
             Message::FetchTickers => {
                 let Some(sender) = &self.sender else {
                     self.status = "No sender available yet".to_string();
@@ -338,16 +209,17 @@ impl App {
                 };
 
                 // Use the ExecuteTool command variant
-                let command = Command::ExecuteTool {
-                    tool_id: "call_endpoint".to_string(),
-                    params: serde_json::json!({
+                let command = Command::execute_tool(
+                    "call_endpoint".to_string(),
+                    serde_json::json!({
                         "module": "Tickers",
                         "endpoint": "all",
                         "arguments": {
                             "limit": 100
                         }
                     }),
-                };
+                    None,
+                );
 
                 self.status = "Fetching tickers...".to_string();
 
@@ -364,7 +236,7 @@ impl App {
                     return Task::none();
                 };
 
-                let command = Command::ListTools;
+                let command = Command::list_tools(None);
 
                 self.status = "Discovering tools...".to_string();
 
@@ -378,10 +250,11 @@ impl App {
                     return Task::none();
                 };
 
-                let command = Command::ExecuteTool {
-                    tool_id: "list_modules".to_string(),
-                    params: serde_json::json!({}),
-                };
+                let command = Command::execute_tool(
+                    "list_modules".to_string(),
+                    serde_json::json!({}),
+                    None,
+                );
 
                 self.status = "Listing modules...".to_string();
 
@@ -395,13 +268,14 @@ impl App {
                     return Task::none();
                 };
 
-                let command = Command::ExecuteTool {
-                    tool_id: "get_endpoint_schema".to_string(),
-                    params: serde_json::json!({
+                let command = Command::execute_tool(
+                    "get_endpoint_schema".to_string(),
+                    serde_json::json!({
                         "module": "Aggs",
-                        "endpoint": "aggregates"
+                        "endpoint": "GroupedDaily"
                     }),
-                };
+                    None,
+                );
 
                 self.status = "Getting aggregates schema...".to_string();
 

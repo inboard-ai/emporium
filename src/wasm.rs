@@ -8,7 +8,7 @@ use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store};
 
 use crate::Error;
-use crate::data::{Command, Id, Response};
+use crate::data::{Command, Event, Id};
 
 /// Public type aliases for easier consumer access
 pub type Sender = futures::channel::mpsc::UnboundedSender<Command>;
@@ -88,7 +88,7 @@ impl Extension {
 
     /// Convert the extension into a sipper that emits responses.
     /// The sipper will first emit a Connected response with a message sender.
-    pub fn into_sipper(self) -> impl Sipper<(), Response> {
+    pub fn into_sipper(self) -> impl Sipper<(), Event> {
         let (msg_tx, mut msg_rx): (Sender, Receiver) = mpsc::unbounded();
 
         sipper(move |mut output| async move {
@@ -110,14 +110,11 @@ impl Extension {
             // Create WASI context
             let wasi = wasmtime_wasi::WasiCtxBuilder::new().inherit_stdio().build();
 
-            let mut store = Store::new(
-                &engine,
-                State {
-                    table: wasmtime_wasi::ResourceTable::new(),
-                    wasi,
-                    http: wasmtime_wasi_http::types::WasiHttpCtx::new(),
-                },
-            );
+            let mut store = Store::new(&engine, State {
+                table: wasmtime_wasi::ResourceTable::new(),
+                wasi,
+                http: wasmtime_wasi_http::types::WasiHttpCtx::new(),
+            });
 
             let bindings = bindings::ExtensionWorld::instantiate_async(&mut store, &component, &linker)
                 .await
@@ -131,12 +128,12 @@ impl Extension {
                 .unwrap();
 
             output
-                .send(Response::Metadata {
+                .send(Event::Core(emporium_core::Response::Metadata {
                     id: metadata.id,
                     name: metadata.name,
                     version: metadata.version,
                     description: metadata.description,
-                })
+                }))
                 .await;
 
             // Create an extension instance
@@ -146,16 +143,22 @@ impl Extension {
             let instance_resource = instance.call_new(&mut store, &self.config).await.unwrap();
 
             // Send the Connected response with the message sender
-            output.send(Response::Connected(msg_tx.clone())).await;
+            output.send(Event::Connected(msg_tx.clone())).await;
 
             // Process messages
             while let Some(cmd) = msg_rx.next().await {
+                // Extract correlation_id for error handling
+                let correlation_id = cmd.correlation_id().cloned();
+
                 // Serialize the command to JSON
                 let cmd_json = match serde_json::to_string(&cmd) {
                     Ok(json) => json,
                     Err(e) => {
                         output
-                            .send(Response::Error(format!("Failed to serialize command: {}", e)))
+                            .send(Event::Core(emporium_core::Response::Error {
+                                message: format!("Failed to serialize command: {}", e),
+                                correlation_id,
+                            }))
                             .await;
                         continue;
                     }
@@ -166,24 +169,38 @@ impl Extension {
                 // Pass the JSON string to the extension
                 match instance.call_update(&mut store, instance_resource, &cmd_json).await {
                     Ok(Ok(response_json)) => {
-                        // Try to deserialize the response as our Response enum
-                        match serde_json::from_str::<Response>(&response_json) {
-                            Ok(response) => {
-                                output.send(response).await;
+                        // Try to deserialize the response as core Response enum
+                        match serde_json::from_str::<emporium_core::Response>(&response_json) {
+                            Ok(core_response) => {
+                                output.send(Event::Core(core_response)).await;
                             }
-                            Err(_) => {
-                                // Fallback for backwards compatibility - treat as raw data
-                                output.send(Response::Data(response_json)).await;
+                            Err(e) => {
+                                output
+                                    .send(Event::Core(emporium_core::Response::Error {
+                                        message: format!("Failed to deserialize response: {}", e),
+                                        correlation_id,
+                                    }))
+                                    .await;
                             }
                         }
                     }
                     Ok(Err(error)) => {
                         // Extension returned an error
-                        output.send(Response::Error(error)).await;
+                        output
+                            .send(Event::Core(emporium_core::Response::Error {
+                                message: error,
+                                correlation_id,
+                            }))
+                            .await;
                     }
                     Err(e) => {
                         // WASM runtime error
-                        output.send(Response::Error(format!("Runtime error: {}", e))).await;
+                        output
+                            .send(Event::Core(emporium_core::Response::Error {
+                                message: format!("Runtime error: {}", e),
+                                correlation_id,
+                            }))
+                            .await;
                     }
                 }
             }

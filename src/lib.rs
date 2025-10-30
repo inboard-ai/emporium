@@ -4,7 +4,7 @@ pub mod extension;
 pub mod registry;
 pub mod wasm;
 
-pub use data::{Command, Id, Response};
+pub use data::{Command, Event, Id};
 pub use error::Error;
 pub use extension::{Manifest, list};
 pub use registry::Registry;

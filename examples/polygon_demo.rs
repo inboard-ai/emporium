@@ -27,12 +27,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Process initial events until we get Connected
     while let Some(response) = sipper.next().await {
         match response {
-            Response::Connected(msg_tx) => {
+            Event::Connected(msg_tx) => {
                 println!("✓ Extension connected");
                 sender = Some(msg_tx);
                 break; // Got sender, can proceed
             }
-            Response::Metadata { id, name, version, .. } => {
+            Event::Metadata { id, name, version, .. } => {
                 println!("✓ Loaded: {} {} v{}", id, name, version);
             }
             _ => {}
@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Get the response
         if let Some(response) = sipper.next().await {
             match response {
-                Response::Data(json_str) => {
+                Event::Data(json_str) => {
                     println!("← Response received:");
 
                     // Pretty print the JSON
@@ -62,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("{}", json_str);
                     }
                 }
-                Response::Error(err) => {
+                Event::Error(err) => {
                     eprintln!("✗ Error: {}", err);
                 }
                 _ => {}

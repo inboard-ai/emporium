@@ -1,5 +1,5 @@
 //! Manage extensions and send them messages.
-use crate::{Command, Error, Extension, Id, Response};
+use crate::{Command, Error, Extension, Id, Event};
 use futures::channel::mpsc;
 use futures::{Stream, StreamExt};
 use std::collections::HashMap;
@@ -8,9 +8,9 @@ pub struct Registry {
     /// Loaded extensions
     extensions: HashMap<Id, mpsc::UnboundedSender<Command>>,
     /// Event sender that extensions use
-    event_tx: mpsc::UnboundedSender<(Id, Response)>,
+    event_tx: mpsc::UnboundedSender<(Id, Event)>,
     /// Event receiver that extensions use
-    event_rx: mpsc::UnboundedReceiver<(Id, Response)>,
+    event_rx: mpsc::UnboundedReceiver<(Id, Event)>,
 }
 
 impl Registry {
@@ -60,7 +60,7 @@ impl Registry {
     }
 
     /// Get a stream of all events from all extensions
-    pub fn events(&mut self) -> impl Stream<Item = (Id, Response)> + '_ {
+    pub fn events(&mut self) -> impl Stream<Item = (Id, Event)> + '_ {
         &mut self.event_rx
     }
 

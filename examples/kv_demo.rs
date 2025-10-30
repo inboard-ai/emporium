@@ -6,7 +6,7 @@ use emporium::*;
 /// Collect all responses from the extension
 async fn collect_responses<S>(mut sipper: S) -> Vec<Value>
 where
-    S: Sipper<(), Response> + Unpin,
+    S: Sipper<(), Event> + Unpin,
 {
     let mut responses = Vec::new();
     // while let Some(resp) = sipper.next().await {

@@ -1,60 +1,97 @@
 //! Command handling for emporium protocol
 
 use emporium_core::{Command, CoreError, Response, ToolResult};
+use polygon::tool_use;
 use serde_json::{Value, json};
 
 /// Handle emporium protocol commands and return appropriate responses
 pub async fn respond<Client: polygon::Request>(client: &polygon::Polygon<Client>, cmd: Command) -> Response<CoreError> {
     match cmd {
-        Command::ListTools => Response::ToolList(polygon::tool_use::list_tools()),
-        Command::GetToolDetails { tool_id } => match polygon::tool_use::get_tool_details(&tool_id) {
-            Some(tool) => Response::ToolDetails(tool),
-            None => Response::Error(format!("Tool '{}' not found", tool_id)),
+        Command::ListTools { correlation_id } => Response::ToolList {
+            tools: tool_use::list_tools(),
+            correlation_id,
         },
-        Command::ExecuteTool { tool_id, params } => {
+        Command::GetToolDetails {
+            tool_id,
+            correlation_id,
+        } => match tool_use::get_tool_details(&tool_id) {
+            Some(tool) => Response::ToolDetails {
+                tool_id,
+                tool_info: tool,
+                correlation_id,
+            },
+            None => Response::Error {
+                message: format!("Tool '{}' not found", tool_id),
+                correlation_id,
+            },
+        },
+        Command::ExecuteTool {
+            tool_id,
+            params,
+            correlation_id,
+        } => {
             let request = json!({
                 "tool": tool_id.clone(),
                 "params": params
             });
 
-            match polygon::tool_use::call_tool(client, request).await {
+            match tool_use::call_tool(client, request).await {
                 Ok(result) => {
                     // Create ToolResult based on what polygon returned
                     let tool_result = match result {
-                        polygon::tool_use::ToolCallResult::Text(text) => ToolResult::text(text),
-                        polygon::tool_use::ToolCallResult::DataFrame { data, schema } => {
-                            ToolResult::columnar(data, schema)
-                        }
+                        tool_use::ToolCallResult::Text(text) => ToolResult::text(text),
+                        tool_use::ToolCallResult::DataFrame { data, schema } => ToolResult::columnar(data, schema),
                     };
 
                     Response::ToolResult {
                         tool_id,
                         result: tool_result,
+                        correlation_id,
                     }
                 }
-                Err(e) => Response::Error(format!("Tool execution failed: {:?}", e)),
+                Err(e) => Response::Error {
+                    message: format!("Tool execution failed: {:?}", e),
+                    correlation_id,
+                },
             }
         }
-        Command::Custom(msg) => {
-            // Try to parse as legacy tool call format
-            if let Ok(request) = serde_json::from_str::<Value>(&msg) {
+        Command::Custom {
+            command,
+            correlation_id,
+        } => {
+            if let Ok(request) = serde_json::from_str::<Value>(&command) {
                 if request.get("tool").is_some() {
-                    match polygon::tool_use::call_tool(client, request).await {
+                    match tool_use::call_tool(client, request).await {
+                        // Create ToolResult based on what polygon returned
                         Ok(result) => {
-                            // Unpack the result and convert to string for legacy compatibility
-                            let data_str = match result {
-                                polygon::tool_use::ToolCallResult::Text(text) => text,
-                                polygon::tool_use::ToolCallResult::DataFrame { data, .. } => data.to_string(),
+                            let tool_result = match result {
+                                tool_use::ToolCallResult::Text(text) => ToolResult::text(text),
+                                tool_use::ToolCallResult::DataFrame { data, schema } => {
+                                    ToolResult::columnar(data, schema)
+                                }
                             };
-                            Response::Data(data_str)
+                            Response::ToolResult {
+                                tool_id: "custom".to_string(),
+                                result: tool_result,
+                                correlation_id,
+                            }
                         }
-                        Err(e) => Response::Error(format!("Tool call failed: {:?}", e)),
+                        Err(e) => Response::Error {
+                            message: format!("Tool execution failed: {:?}", e),
+                            correlation_id,
+                        },
                     }
                 } else {
-                    Response::Error("Invalid custom command format".to_string())
+                    Response::Error {
+                        message: "Invalid custom command format".to_string(),
+                        correlation_id,
+                    }
                 }
             } else {
-                Response::Error("Invalid custom command format".to_string())
+                Response::Error {
+                    message: "Invalid custom command format".to_string(),
+                    correlation_id,
+                }
             }
         }
     }

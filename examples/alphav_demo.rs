@@ -27,12 +27,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Process initial events until we get Connected
     while let Some(response) = sipper.next().await {
         match response {
-            Response::Connected(msg_tx) => {
+            Event::Connected(msg_tx) => {
                 println!("✓ Extension connected");
                 sender = Some(msg_tx);
                 break; // Got sender, can proceed
             }
-            Response::Metadata { id, name, version, .. } => {
+            Event::Metadata { id, name, version, .. } => {
                 println!("✓ Loaded: {} {} v{}", id, name, version);
             }
             _ => {}
@@ -46,13 +46,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if let Some(response) = sipper.next().await {
             match response {
-                Response::ToolList(tools) => {
+                Event::ToolList(tools) => {
                     println!("← Available tools:");
                     for tool in tools {
                         println!("  - {}: {}", tool.id, tool.description);
                     }
                 }
-                Response::Error(err) => eprintln!("✗ Error: {}", err),
+                Event::Error(err) => eprintln!("✗ Error: {}", err),
                 _ => {}
             }
         }
@@ -70,12 +70,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if let Some(response) = sipper.next().await {
             match response {
-                Response::ToolResult { tool_id, result } => {
+                Event::ToolResult { tool_id, result } => {
                     println!("← Response from '{}' tool:", tool_id);
                     // Pretty print the JSON
                     println!("{}", serde_json::to_string_pretty(&result)?);
                 }
-                Response::Data(json_str) => {
+                Event::Data(json_str) => {
                     println!("← Response (legacy format):");
                     if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&json_str) {
                         println!("{}", serde_json::to_string_pretty(&json_val)?);
@@ -83,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("{}", json_str);
                     }
                 }
-                Response::Error(err) => {
+                Event::Error(err) => {
                     eprintln!("✗ Error: {}", err);
                 }
                 _ => {}
@@ -104,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if let Some(response) = sipper.next().await {
             match response {
-                Response::ToolResult { tool_id, result } => {
+                Event::ToolResult { tool_id, result } => {
                     println!("← Response from '{}' tool:", tool_id);
                     // Show just a summary since intraday data can be large
                     if let Some(meta) = result.get("Meta Data") {
@@ -122,7 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
-                Response::Data(json_str) => {
+                Event::Data(json_str) => {
                     println!("← Response (legacy format):");
                     if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&json_str) {
                         // Show summary for large responses
@@ -131,7 +131,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
-                Response::Error(err) => {
+                Event::Error(err) => {
                     eprintln!("✗ Error: {}", err);
                 }
                 _ => {}
@@ -150,17 +150,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if let Some(response) = sipper.next().await {
             match response {
-                Response::ToolResult { tool_id, result } => {
+                Event::ToolResult { tool_id, result } => {
                     println!("← Response from '{}' tool:", tool_id);
                     println!("{}", serde_json::to_string_pretty(&result)?);
                 }
-                Response::Data(json_str) => {
+                Event::Data(json_str) => {
                     println!("← Response (legacy format):");
                     if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&json_str) {
                         println!("{}", serde_json::to_string_pretty(&json_val)?);
                     }
                 }
-                Response::Error(err) => {
+                Event::Error(err) => {
                     eprintln!("✗ Error: {}", err);
                 }
                 _ => {}
