@@ -218,6 +218,8 @@ impl Internal {
         // Handle command and get response
         let response = command::respond(&self.0, cmd).await;
 
+        log("debug", &format!("alphav response: {response:?}"));
+
         // Serialize the response
         serde_json::to_string(&response).map_err(|e| format!("Failed to serialize response: {}", e))
     }
