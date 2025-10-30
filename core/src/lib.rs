@@ -4,7 +4,7 @@ use polars_core::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// Core error type for data operations
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
 pub enum CoreError {
     #[error("JSON error: {0}")]
     JsonError(String),
@@ -132,12 +132,17 @@ pub struct ToolInfo {
 }
 
 /// Tool execution result with type safety
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ToolResult {
     /// Text-based result
     Text(String),
-    /// DataFrame result with schema
-    DataFrame(DataFrame),
+    /// Columnar data that can be converted to DataFrame on the client
+    Columns {
+        /// The column data
+        columns: Vec<Column>,
+        /// The schema definition for the columns
+        schema: Schema,
+    },
 }
 
 impl ToolResult {
@@ -146,7 +151,7 @@ impl ToolResult {
         Ok(ToolResult::Text(text.into()))
     }
 
-    /// Create a new DataFrame result
+    /// Create columnar data that can be converted to DataFrame on the client
     pub fn columnar(data: serde_json::Value, column_defs: Schema) -> Result<Self, CoreError> {
         // Helper to convert string dtype to Polars DataType
         fn to_dtype(dtype: &str) -> DataType {
@@ -167,14 +172,11 @@ impl ToolResult {
             .ok_or_else(|| CoreError::Custom("Data must be a JSON array".to_string()))?;
 
         if arr.is_empty() {
-            // Create empty DataFrame with schema
-            let polars_schema = polars_core::prelude::Schema::from_iter(
-                column_defs
-                    .iter()
-                    .map(|col| (col.alias.clone().into(), to_dtype(&col.dtype))),
-            );
-            let df = DataFrame::empty_with_schema(&polars_schema);
-            return Ok(ToolResult::DataFrame(df));
+            // Return empty columns vector with schema
+            return Ok(ToolResult::Columns {
+                columns: Vec::new(),
+                schema: column_defs,
+            });
         }
 
         // Create Series for each column based on schema
@@ -235,10 +237,10 @@ impl ToolResult {
             columns_vec.push(Column::Series(series.into()));
         }
 
-        let dataframe = DataFrame::new(columns_vec)
-            .map_err(|e| CoreError::DataFrameError(format!("Failed to create DataFrame: {}", e)))?;
-
-        Ok(ToolResult::DataFrame(dataframe))
+        Ok(ToolResult::Columns {
+            columns: columns_vec,
+            schema: column_defs,
+        })
     }
 }
 
@@ -268,7 +270,6 @@ pub enum Response<E = CoreError> {
     },
 
     /// Result from tool execution
-    #[serde(skip)]
     ToolResult {
         tool_id: String,
         result: Result<ToolResult, E>,
