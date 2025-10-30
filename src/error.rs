@@ -22,6 +22,8 @@ pub enum Error {
     ExtensionLoadError(String),
     #[error("Manifest error: {0}")]
     ManifestError(ManifestError),
+    #[error("JSON error: {0}")]
+    JsonError(Arc<serde_json::Error>),
     #[error("{0}")]
     Custom(String),
 }
@@ -67,5 +69,11 @@ impl From<String> for Error {
 impl From<&str> for Error {
     fn from(err: &str) -> Self {
         Error::Custom(err.to_string())
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(err: serde_json::Error) -> Self {
+        Error::JsonError(Arc::new(err))
     }
 }
