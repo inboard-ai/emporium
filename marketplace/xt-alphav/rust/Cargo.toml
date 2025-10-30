@@ -12,13 +12,10 @@ crate-type = ["cdylib"]
 wit-bindgen = "0.35"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-alphav = { path = "../../../alphav", default-features = false, features = [
+emporium-core = { path = "../../../core" }
+alphav = { git = "https://github.com/inboard-ai/alphav.git", branch = "dev", default-features = false, features = [
     "decoder",
 ] }
-# for development
-# alphav = { git = "https://github.com/inboard-ai/alphav.git", default-features = false, features = [
-#     "decoder",
-# ] }
 futures = "0.3"
 
 [package.metadata.component]
@@ -27,7 +24,12 @@ package = "extension:api"
 [package.metadata.component.target]
 path = "../../../wit" # path to inboard extension API WIT
 
-# [patch.crates-io]
-# alphav = { path = "../../../../alphav" }
+# Patch to use local emporium-core for both direct and transitive dependencies
+[patch.'https://github.com/inboard-ai/emporium.git']
+emporium-core = { path = "../../../core" }
+
+# Uncomment for local alphav development
+# [patch.'https://github.com/inboard-ai/alphav.git']
+# alphav = { path = "../../../alphav" }
 
 [workspace]
