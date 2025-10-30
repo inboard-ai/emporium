@@ -1,10 +1,10 @@
 //! Command handling for emporium protocol
 
-use emporium::data::{Command, Response, ToolResult};
+use emporium_core::{Command, CoreError, Response, ToolResult};
 use serde_json::{Value, json};
 
 /// Handle emporium protocol commands and return appropriate responses
-pub async fn respond<Client: polygon::Request>(client: &polygon::Polygon<Client>, cmd: Command) -> Response {
+pub async fn respond<Client: polygon::Request>(client: &polygon::Polygon<Client>, cmd: Command) -> Response<CoreError> {
     match cmd {
         Command::ListTools => Response::ToolList(polygon::tool_use::list_tools()),
         Command::GetToolDetails { tool_id } => match polygon::tool_use::get_tool_details(&tool_id) {

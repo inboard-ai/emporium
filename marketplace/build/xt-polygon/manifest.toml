@@ -12,7 +12,7 @@ license = "MIT"
 
 # WASM component entry point
 [component]
-entry = "xt_polygon.wasm"
+entry = "extension.wasm"
 world = "polygon-provider"
 
 # Configuration schema for instances

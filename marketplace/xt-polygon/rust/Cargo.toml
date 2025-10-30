@@ -12,7 +12,7 @@ crate-type = ["cdylib"]
 wit-bindgen = "0.35"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-emporium = { path = "../../.." }
+emporium-core = { path = "../../../core" }
 polygon = { git = "https://github.com/inboard-ai/polygon.git", branch = "dev", default-features = false, features = [
     "decoder",
 ] }
@@ -24,11 +24,12 @@ package = "extension:api"
 [package.metadata.component.target]
 path = "../../../wit" # path to inboard extension API WIT
 
-# Uncomment for local development
+# Patch to use local emporium-core for both direct and transitive dependencies
+[patch.'https://github.com/inboard-ai/emporium.git']
+emporium-core = { path = "../../../core" }
+
+# Uncomment for local polygon development
 # [patch.'https://github.com/inboard-ai/polygon.git']
 # polygon = { path = "../../../polygon" }
-# 
-# [patch.'https://github.com/inboard-ai/emporium.git']
-# emporium-core = { path = "../../../core" }
 
 [workspace]
