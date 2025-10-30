@@ -12,7 +12,7 @@ license = "MIT"
 
 # WASM component entry point
 [component]
-entry = "xt_alphav.wasm"
+entry = "extension.wasm"
 world = "alphav-provider"
 
 # Configuration schema for instances

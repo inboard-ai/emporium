@@ -2,7 +2,7 @@
 # Market data extension using AlphaVantage REST API
 
 [extension]
-id = "alphav"
+id = "alphavantage"
 name = "AlphaVantage Market Data"
 version = "0.1.0"
 description = "Access real-time and historical market data from AlphaVantage. Supports stocks, forex, crypto data, and technical indicators."
@@ -12,7 +12,7 @@ license = "MIT"
 
 # WASM component entry point
 [component]
-entry = "xt_alphav.wasm"
+entry = "extension.wasm"
 world = "alphav-provider"
 
 # Configuration schema for instances
