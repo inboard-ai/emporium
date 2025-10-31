@@ -47,7 +47,7 @@ pub async fn respond<Client: polygon::Request>(client: &polygon::Polygon<Client>
 
                     Response::ToolResult {
                         tool_id,
-                        result: tool_result,
+                        result: Ok(tool_result),
                         correlation_id,
                     }
                 }
@@ -74,7 +74,7 @@ pub async fn respond<Client: polygon::Request>(client: &polygon::Polygon<Client>
                             };
                             Response::ToolResult {
                                 tool_id: "custom".to_string(),
-                                result: tool_result,
+                                result: Ok(tool_result),
                                 correlation_id,
                             }
                         }

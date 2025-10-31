@@ -13,9 +13,7 @@ members = [".", "core", "examples/gui_example"]
 anyhow = "1.0"
 emporium-core = { path = "./core" }
 futures = { version = "0.3", default-features = false }
-polars-core = { version = "0.51", default-features = false, features = [
-    "serde",
-] }
+polars-core = { version = "0.51", default-features = false }
 serde = { version = "1.0.208", features = ["serde_derive"] }
 serde_json = "1.0.125"
 sipper = "0.1.0"
@@ -36,3 +34,12 @@ dotenvy = "0.15"
 
 # [patch.crates-io]
 # iced.git = "https://github.com/iced-rs/iced.git"
+
+# [patch.'https://github.com/inboard-ai/emporium.git']
+# # emporium-core = { path = "../../../core" }
+
+# [patch.'https://github.com/inboard-ai/polygon.git']
+# polygon = { path = "../../../polygon" }
+
+# [patch.'https://github.com/inboard-ai/alphav.git']
+# alphav = { path = "../../../alphav" }

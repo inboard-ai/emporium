@@ -12,7 +12,6 @@ crate-type = ["cdylib"]
 wit-bindgen = "0.35"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-# emporium-core = { path = "../../../core" }
 emporium-core = { git = "https://github.com/inboard-ai/emporium.git", branch = "dev" }
 polygon = { git = "https://github.com/inboard-ai/polygon.git", branch = "dev", default-features = false, features = [
     "decoder",
@@ -24,12 +23,5 @@ package = "extension:api"
 
 [package.metadata.component.target]
 path = "../../../wit" # path to inboard extension API WIT
-
-# Patch to use local crates for local development
-# [patch.'https://github.com/inboard-ai/emporium.git']
-# emporium-core = { path = "../../../core" }
-
-# [patch.'https://github.com/inboard-ai/polygon.git']
-# polygon = { path = "../../../polygon" }
 
 [workspace]

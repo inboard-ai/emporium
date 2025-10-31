@@ -2,6 +2,7 @@
 
 use polars_core::prelude::*;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Core error type for data operations
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
@@ -12,6 +13,12 @@ pub enum CoreError {
     DataFrameError(String),
     #[error("{0}")]
     Custom(String),
+}
+
+impl CoreError {
+    pub fn custom<T: Into<String>>(msg: T) -> Self {
+        CoreError::Custom(msg.into())
+    }
 }
 
 impl From<serde_json::Error> for CoreError {
@@ -71,7 +78,7 @@ pub enum Command {
         /// The tool to execute
         tool_id: String,
         /// The tool input as a JSON value
-        params: serde_json::Value,
+        params: Value,
         #[serde(skip_serializing_if = "Option::is_none")]
         correlation_id: Option<String>,
     },
@@ -99,7 +106,7 @@ impl Command {
     }
 
     /// Create an ExecuteTool command with optional correlation ID
-    pub fn execute_tool(tool_id: String, params: serde_json::Value, correlation_id: Option<String>) -> Self {
+    pub fn execute_tool(tool_id: String, params: Value, correlation_id: Option<String>) -> Self {
         Self::ExecuteTool {
             tool_id,
             params,
@@ -128,7 +135,7 @@ pub struct ToolInfo {
     /// Description of what the tool does
     pub description: String,
     /// JSON Schema for the tool's parameters
-    pub schema: serde_json::Value,
+    pub schema: Value,
 }
 
 /// Tool execution result with type safety
@@ -136,29 +143,27 @@ pub struct ToolInfo {
 pub enum ToolResult {
     /// Text-based result
     Text(String),
+    // Columns {
+    //     /// The column data
+    //     columns: Vec<Column>,
+    //     /// The schema definition for the columns
+    //     schema: Schema,
+    //     /// Any metadata associated with the result
+    //     metadata: Option<Value>,
+    // },
     /// Columnar data that can be converted to DataFrame on the client
-    Columns {
-        /// The column data
-        columns: Vec<Column>,
-        /// The schema definition for the columns
-        schema: Schema,
-        /// Any metadata associated with the result
-        metadata: Option<serde_json::Value>,
-    },
+    DataFrame(ProtoDataFrame),
 }
 
-impl ToolResult {
-    /// Create a new text result
-    pub fn text<T: Into<String>>(text: T) -> Result<Self, CoreError> {
-        Ok(ToolResult::Text(text.into()))
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtoDataFrame {
+    pub schema: Schema,
+    pub data: Value,
+    pub metadata: Option<Value>,
+}
 
-    /// Create columnar data that can be converted to DataFrame on the client
-    pub fn columnar(
-        data: serde_json::Value,
-        column_defs: Schema,
-        metadata: Option<serde_json::Value>,
-    ) -> Result<Self, CoreError> {
+impl ProtoDataFrame {
+    pub fn to_dataframe(self) -> Result<DataFrame, CoreError> {
         // Helper to convert string dtype to Polars DataType
         fn to_dtype(dtype: &str) -> DataType {
             match dtype {
@@ -167,88 +172,109 @@ impl ToolResult {
                 "integer" | "int" => DataType::Int64,
                 "boolean" | "bool" => DataType::Boolean,
                 "date" => DataType::Date,
-                "datetime" => DataType::Datetime(TimeUnit::Microseconds, None),
+                "datetime" => DataType::Unknown(UnknownKind::Ufunc),
                 _ => DataType::String, // Default to string for unknown types
             }
         }
 
-        // Validate that data is an array
-        let arr = data
-            .as_array()
-            .ok_or_else(|| CoreError::Custom("Data must be a JSON array".to_string()))?;
+        match self.data {
+            Value::Array(arr) => {
+                if arr.is_empty() {
+                    // Return empty columns vector with schema
+                    return Ok(DataFrame::empty());
+                }
 
-        if arr.is_empty() {
-            // Return empty columns vector with schema
-            return Ok(ToolResult::Columns {
-                columns: Vec::new(),
-                schema: column_defs,
-                metadata,
-            });
+                // Create Series for each column based on schema
+                let mut columns_vec = Vec::new();
+
+                for col_def in &self.schema {
+                    let dtype = to_dtype(&col_def.dtype);
+                    let alias = col_def.alias.clone().into();
+                    let series = match dtype {
+                        DataType::String => {
+                            let values: Vec<Option<String>> = arr
+                                .iter()
+                                .map(|item| {
+                                    item.get(&col_def.name).and_then(|v| match v {
+                                        serde_json::Value::String(s) => Some(s.clone()),
+                                        serde_json::Value::Null => None,
+                                        other => Some(other.to_string()),
+                                    })
+                                })
+                                .collect();
+                            Series::new(alias, values)
+                        }
+                        DataType::Float64 => {
+                            let values: Vec<Option<f64>> = arr
+                                .iter()
+                                .map(|item| item.get(&col_def.name).and_then(|v| v.as_f64()))
+                                .collect();
+                            Series::new(alias, values)
+                        }
+                        DataType::Int64 => {
+                            let values: Vec<Option<i64>> = arr
+                                .iter()
+                                .map(|item| item.get(&col_def.name).and_then(|v| v.as_i64()))
+                                .collect();
+                            Series::new(alias, values)
+                        }
+                        DataType::Boolean => {
+                            let values: Vec<Option<bool>> = arr
+                                .iter()
+                                .map(|item| item.get(&col_def.name).and_then(|v| v.as_bool()))
+                                .collect();
+                            Series::new(alias, values)
+                        }
+                        _ => {
+                            // Default to string representation for other types
+                            let values: Vec<Option<String>> = arr
+                                .iter()
+                                .map(|item| {
+                                    item.get(&col_def.name).and_then(|v| match v {
+                                        serde_json::Value::Null => None,
+                                        other => Some(other.to_string()),
+                                    })
+                                })
+                                .collect();
+                            Series::new(alias, values)
+                        }
+                    };
+                    columns_vec.push(Column::Series(series.into()));
+                }
+
+                DataFrame::new(columns_vec).map_err(|e| CoreError::Custom(format!("Polars error: {e}")))
+            }
+
+            Value::Object(obj) => {
+                todo!()
+            }
+
+            Value::Null => Ok(DataFrame::empty()),
+
+            Value::Number(num) => {
+                todo!()
+            }
+
+            Value::String(s) => {
+                todo!()
+            }
+
+            Value::Bool(b) => {
+                todo!()
+            }
         }
+    }
+}
 
-        // Create Series for each column based on schema
-        let mut columns_vec = Vec::new();
+impl ToolResult {
+    /// Create a new text result
+    pub fn text<T: Into<String>>(text: T) -> Self {
+        ToolResult::Text(text.into())
+    }
 
-        for col_def in &column_defs {
-            let dtype = to_dtype(&col_def.dtype);
-            let alias = col_def.alias.clone().into();
-            let series = match dtype {
-                DataType::String => {
-                    let values: Vec<Option<String>> = arr
-                        .iter()
-                        .map(|item| {
-                            item.get(&col_def.name).and_then(|v| match v {
-                                serde_json::Value::String(s) => Some(s.clone()),
-                                serde_json::Value::Null => None,
-                                other => Some(other.to_string()),
-                            })
-                        })
-                        .collect();
-                    Series::new(alias, values)
-                }
-                DataType::Float64 => {
-                    let values: Vec<Option<f64>> = arr
-                        .iter()
-                        .map(|item| item.get(&col_def.name).and_then(|v| v.as_f64()))
-                        .collect();
-                    Series::new(alias, values)
-                }
-                DataType::Int64 => {
-                    let values: Vec<Option<i64>> = arr
-                        .iter()
-                        .map(|item| item.get(&col_def.name).and_then(|v| v.as_i64()))
-                        .collect();
-                    Series::new(alias, values)
-                }
-                DataType::Boolean => {
-                    let values: Vec<Option<bool>> = arr
-                        .iter()
-                        .map(|item| item.get(&col_def.name).and_then(|v| v.as_bool()))
-                        .collect();
-                    Series::new(alias, values)
-                }
-                _ => {
-                    // Default to string representation for other types
-                    let values: Vec<Option<String>> = arr
-                        .iter()
-                        .map(|item| {
-                            item.get(&col_def.name).and_then(|v| match v {
-                                serde_json::Value::Null => None,
-                                other => Some(other.to_string()),
-                            })
-                        })
-                        .collect();
-                    Series::new(alias, values)
-                }
-            };
-            columns_vec.push(Column::Series(series.into()));
-        }
-
-        Ok(ToolResult::Columns {
-            columns: columns_vec,
-            schema: column_defs,
-            metadata,
-        })
+    /// Create columnar data that can be converted to DataFrame on the client
+    pub fn columnar(data: serde_json::Value, schema: Schema, metadata: Option<serde_json::Value>) -> Self {
+        ToolResult::DataFrame(ProtoDataFrame { schema, data, metadata })
     }
 }
 
