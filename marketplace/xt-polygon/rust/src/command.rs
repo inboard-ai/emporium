@@ -40,8 +40,8 @@ pub async fn respond<Client: polygon::Request>(client: &polygon::Polygon<Client>
                     // Create ToolResult based on what polygon returned
                     let tool_result = match result {
                         tool_use::ToolCallResult::Text(text) => ToolResult::text(text),
-                        tool_use::ToolCallResult::DataFrame { data, schema } => {
-                            ToolResult::columnar(data, schema, None)
+                        tool_use::ToolCallResult::DataFrame { data, schema, metadata } => {
+                            ToolResult::columnar(data, schema, metadata)
                         }
                     };
 
@@ -68,8 +68,8 @@ pub async fn respond<Client: polygon::Request>(client: &polygon::Polygon<Client>
                         Ok(result) => {
                             let tool_result = match result {
                                 tool_use::ToolCallResult::Text(text) => ToolResult::text(text),
-                                tool_use::ToolCallResult::DataFrame { data, schema } => {
-                                    ToolResult::columnar(data, schema, None)
+                                tool_use::ToolCallResult::DataFrame { data, schema, metadata } => {
+                                    ToolResult::columnar(data, schema, metadata)
                                 }
                             };
                             Response::ToolResult {
