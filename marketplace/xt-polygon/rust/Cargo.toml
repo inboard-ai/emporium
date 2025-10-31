@@ -25,11 +25,10 @@ package = "extension:api"
 [package.metadata.component.target]
 path = "../../../wit" # path to inboard extension API WIT
 
-# Patch to use local emporium-core for both direct and transitive dependencies
+# Patch to use local crates for local development
 # [patch.'https://github.com/inboard-ai/emporium.git']
 # emporium-core = { path = "../../../core" }
 
-# Uncomment for local polygon development
 # [patch.'https://github.com/inboard-ai/polygon.git']
 # polygon = { path = "../../../polygon" }
 

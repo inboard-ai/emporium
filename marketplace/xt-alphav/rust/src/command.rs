@@ -43,7 +43,9 @@ pub async fn respond<Client: alphav::Request>(
                     // Create ToolResult based on what polygon returned
                     let tool_result = match result {
                         tool_use::ToolCallResult::Text(text) => ToolResult::text(text),
-                        tool_use::ToolCallResult::DataFrame { data, schema } => ToolResult::columnar(data, schema),
+                        tool_use::ToolCallResult::DataFrame { data, schema, metadata } => {
+                            ToolResult::columnar(data, schema, metadata)
+                        }
                     };
 
                     Response::ToolResult {
@@ -69,8 +71,8 @@ pub async fn respond<Client: alphav::Request>(
                         Ok(result) => {
                             let tool_result = match result {
                                 tool_use::ToolCallResult::Text(text) => ToolResult::text(text),
-                                tool_use::ToolCallResult::DataFrame { data, schema } => {
-                                    ToolResult::columnar(data, schema)
+                                tool_use::ToolCallResult::DataFrame { data, schema, metadata } => {
+                                    ToolResult::columnar(data, schema, metadata)
                                 }
                             };
                             Response::ToolResult {

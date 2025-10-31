@@ -142,6 +142,8 @@ pub enum ToolResult {
         columns: Vec<Column>,
         /// The schema definition for the columns
         schema: Schema,
+        /// Any metadata associated with the result
+        metadata: Option<serde_json::Value>,
     },
 }
 
@@ -152,7 +154,11 @@ impl ToolResult {
     }
 
     /// Create columnar data that can be converted to DataFrame on the client
-    pub fn columnar(data: serde_json::Value, column_defs: Schema) -> Result<Self, CoreError> {
+    pub fn columnar(
+        data: serde_json::Value,
+        column_defs: Schema,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<Self, CoreError> {
         // Helper to convert string dtype to Polars DataType
         fn to_dtype(dtype: &str) -> DataType {
             match dtype {
@@ -176,6 +182,7 @@ impl ToolResult {
             return Ok(ToolResult::Columns {
                 columns: Vec::new(),
                 schema: column_defs,
+                metadata,
             });
         }
 
@@ -240,6 +247,7 @@ impl ToolResult {
         Ok(ToolResult::Columns {
             columns: columns_vec,
             schema: column_defs,
+            metadata,
         })
     }
 }
