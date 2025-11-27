@@ -32,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sender = Some(msg_tx);
                 break; // Got sender, can proceed
             }
-            Event::Metadata { id, name, version, .. } => {
+            Event::Core(emporium_core::Response::Metadata { id, name, version, .. }) => {
                 println!("✓ Loaded: {} {} v{}", id, name, version);
             }
             _ => {}
@@ -40,40 +40,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Send command to get related tickers
-    if let Some(tx) = sender {
-        let command = json!({
-            "method": "related_tickers",
-            "ticker": "AAPL"
-        });
+    // if let Some(tx) = sender {
+    //     let command = json!({
+    //         "method": "related_tickers",
+    //         "ticker": "AAPL"
+    //     });
 
-        println!("→ Sending command: {}", command);
-        tx.unbounded_send(Command(command.to_string()))?;
+    //     println!("→ Sending command: {}", command);
+    //     tx.unbounded_send(Command(command.to_string()))?;
 
-        // Get the response
-        if let Some(response) = sipper.next().await {
-            match response {
-                Event::Data(json_str) => {
-                    println!("← Response received:");
+    //     // Get the response
+    //     if let Some(response) = sipper.next().await {
+    //         match response {
+    //             Event::Data(json_str) => {
+    //                 println!("← Response received:");
 
-                    // Pretty print the JSON
-                    if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                        println!("{}", serde_json::to_string_pretty(&json_val)?);
-                    } else {
-                        println!("{}", json_str);
-                    }
-                }
-                Event::Error(err) => {
-                    eprintln!("✗ Error: {}", err);
-                }
-                _ => {}
-            }
-        }
+    //                 // Pretty print the JSON
+    //                 if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&json_str) {
+    //                     println!("{}", serde_json::to_string_pretty(&json_val)?);
+    //                 } else {
+    //                     println!("{}", json_str);
+    //                 }
+    //             }
+    //             Event::Error(err) => {
+    //                 eprintln!("✗ Error: {}", err);
+    //             }
+    //             _ => {}
+    //         }
+    //     }
 
-        // Close the sender to cleanly shut down
-        drop(tx);
-    } else {
-        eprintln!("✗ Failed to get sender from extension");
-    }
+    //     // Close the sender to cleanly shut down
+    //     drop(tx);
+    // } else {
+    //     eprintln!("✗ Failed to get sender from extension");
+    // }
 
     // Drain remaining events
     while let Some(_) = sipper.next().await {}

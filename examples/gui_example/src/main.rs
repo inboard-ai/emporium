@@ -164,6 +164,7 @@ impl App {
                     }
                     Response::ToolResult {
                         tool_id,
+                        tool_name,
                         result,
                         correlation_id,
                     } => match result {
@@ -180,8 +181,22 @@ impl App {
                                         text_editor::Content::with_text(&text),
                                     );
                                 }
-                                ToolResult::DataFrame(df) => {
-                                    self.data = ViewData::Table(df);
+                                ToolResult::DataFrame(proto) => {
+                                    match proto.to_dataframe() {
+                                        Ok(df) => {
+                                            self.data = ViewData::Table(df)
+                                        }
+                                        Err(e) => {
+                                            self.data = ViewData::Text(
+                                                text_editor::Content::with_text(
+                                                    &format!(
+                                                        "Failed to convert DataFrame: {}",
+                                                        e.to_string()
+                                                    ),
+                                                ),
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }

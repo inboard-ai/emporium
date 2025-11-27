@@ -75,8 +75,8 @@ pub enum Command {
 
     /// Execute a tool with the provided input
     ExecuteTool {
-        /// The tool to execute
-        tool_id: String,
+        /// The name of the tool to execute
+        name: String,
         /// The tool input as a JSON value
         params: Value,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -458,6 +458,7 @@ pub enum Response<E = CoreError> {
     /// Result from tool execution
     ToolResult {
         tool_id: String,
+        tool_name: String,
         result: Result<ToolResult, E>,
         correlation_id: Option<String>,
     },

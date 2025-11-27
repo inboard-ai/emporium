@@ -187,6 +187,7 @@ struct AlphaVantageExtension(RefCell<Internal>);
 struct Internal(AlphaVantage<WasiHttpClient>);
 
 impl Internal {
+    // FIXME: init should return a Result<> in case client initialization fails.
     fn init(config: &str) -> Self {
         // Parse config to extract api_key
         #[derive(Deserialize)]
