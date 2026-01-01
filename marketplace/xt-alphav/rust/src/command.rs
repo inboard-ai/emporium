@@ -54,8 +54,9 @@ pub async fn respond<Client: alphav::Request>(
                         correlation_id,
                     }
                 }
-                Err(e) => Response::Error {
-                    message: format!("Tool execution failed: {:?}", e),
+                Err(e) => Response::ToolResult {
+                    name,
+                    result: Err(CoreError::Custom(format!("{:?}", e))),
                     correlation_id,
                 },
             }
@@ -81,8 +82,9 @@ pub async fn respond<Client: alphav::Request>(
                                 correlation_id,
                             }
                         }
-                        Err(e) => Response::Error {
-                            message: format!("Tool execution failed: {:?}", e),
+                        Err(e) => Response::ToolResult {
+                            name: "custom".to_string(),
+                            result: Err(CoreError::Custom(format!("{:?}", e))),
                             correlation_id,
                         },
                     }
