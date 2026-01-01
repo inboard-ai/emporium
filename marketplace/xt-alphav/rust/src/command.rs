@@ -1,7 +1,7 @@
 //! Command handling for emporium protocol
 
 use alphav::tool_use;
-use emporium_core::{Command, CoreError, Response, ToolResult};
+use emporium_core::{Command, CoreError, Response, tool::ToolResult};
 use serde_json::{Value, json};
 
 /// Handle emporium protocol commands and return appropriate responses
@@ -29,18 +29,18 @@ pub async fn respond<Client: alphav::Request>(
             },
         },
         Command::ExecuteTool {
-            tool_id,
+            name,
             params,
             correlation_id,
         } => {
             let request = json!({
-                "tool": tool_id.clone(),
+                "tool": name.clone(),
                 "params": params
             });
 
             match tool_use::call_tool(client, request).await {
                 Ok(result) => {
-                    // Create ToolResult based on what polygon returned
+                    // Create ToolResult based on what alphav returned
                     let tool_result = match result {
                         tool_use::ToolCallResult::Text(text) => ToolResult::text(text),
                         tool_use::ToolCallResult::DataFrame { data, schema, metadata } => {
@@ -49,7 +49,7 @@ pub async fn respond<Client: alphav::Request>(
                     };
 
                     Response::ToolResult {
-                        tool_id,
+                        name,
                         result: Ok(tool_result),
                         correlation_id,
                     }
@@ -67,7 +67,7 @@ pub async fn respond<Client: alphav::Request>(
             if let Ok(request) = serde_json::from_str::<Value>(&command) {
                 if request.get("tool").is_some() {
                     match tool_use::call_tool(client, request).await {
-                        // Create ToolResult based on what polygon returned
+                        // Create ToolResult based on what alphav returned
                         Ok(result) => {
                             let tool_result = match result {
                                 tool_use::ToolCallResult::Text(text) => ToolResult::text(text),
@@ -76,7 +76,7 @@ pub async fn respond<Client: alphav::Request>(
                                 }
                             };
                             Response::ToolResult {
-                                tool_id: "custom".to_string(),
+                                name: "custom".to_string(),
                                 result: Ok(tool_result),
                                 correlation_id,
                             }

@@ -1,6 +1,6 @@
 //! Command handling for emporium protocol
 
-use emporium_core::{Command, CoreError, Response, ToolResult};
+use emporium_core::{Command, CoreError, Response, tool::ToolResult};
 use polygon::tool_use;
 use serde_json::{Value, json};
 
@@ -26,12 +26,12 @@ pub async fn respond<Client: polygon::Request>(client: &polygon::Polygon<Client>
             },
         },
         Command::ExecuteTool {
-            tool_id,
+            name,
             params,
             correlation_id,
         } => {
             let request = json!({
-                "tool": tool_id.clone(),
+                "tool": name.clone(),
                 "params": params
             });
 
@@ -46,8 +46,7 @@ pub async fn respond<Client: polygon::Request>(client: &polygon::Polygon<Client>
                     };
 
                     Response::ToolResult {
-                        tool_id,
-                        tool_name,
+                        name,
                         result: Ok(tool_result),
                         correlation_id,
                     }
@@ -74,7 +73,7 @@ pub async fn respond<Client: polygon::Request>(client: &polygon::Polygon<Client>
                                 }
                             };
                             Response::ToolResult {
-                                tool_id: "custom".to_string(),
+                                name: "custom".to_string(),
                                 result: Ok(tool_result),
                                 correlation_id,
                             }

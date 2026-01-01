@@ -34,11 +34,37 @@ pub enum ToolResult {
 }
 
 impl ToolResult {
+    /// Create a new text result
+    pub fn text<T: Into<String>>(content: T) -> Self {
+        ToolResult::Text(Text::new(content))
+    }
+
+    /// Create columnar data that can be converted to DataFrame on the client
+    pub fn columnar(
+        data: serde_json::Value,
+        schema: crate::Schema,
+        metadata: Option<serde_json::Value>,
+    ) -> Self {
+        ToolResult::DataFrame(DataFrame::new(schema, data, metadata))
+    }
+
     /// Get the label from the result, if any
     pub fn label(&self) -> Option<&Label> {
         match self {
             ToolResult::Text(text) => text.label.as_ref(),
             ToolResult::DataFrame(df) => df.label.as_ref(),
         }
+    }
+}
+
+impl From<Text> for ToolResult {
+    fn from(text: Text) -> Self {
+        ToolResult::Text(text)
+    }
+}
+
+impl From<DataFrame> for ToolResult {
+    fn from(df: DataFrame) -> Self {
+        ToolResult::DataFrame(df)
     }
 }
