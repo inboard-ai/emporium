@@ -76,8 +76,8 @@ pub enum Command {
 
     /// Execute a tool with the provided input
     ExecuteTool {
-        /// The identifier of the tool to execute
-        tool_id: String,
+        /// The name of the tool to execute
+        name: String,
         /// The tool input as a JSON value
         params: Value,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -107,9 +107,9 @@ impl Command {
     }
 
     /// Create an ExecuteTool command with optional correlation ID
-    pub fn execute_tool(tool_id: String, params: Value, correlation_id: Option<String>) -> Self {
+    pub fn execute_tool(name: String, params: Value, correlation_id: Option<String>) -> Self {
         Self::ExecuteTool {
-            tool_id,
+            name,
             params,
             correlation_id,
         }
@@ -167,8 +167,8 @@ pub enum Response<E = CoreError> {
 
     /// Result from tool execution
     ToolResult {
-        tool_id: String,
-        tool_name: String,
+        /// The name of the tool that was executed
+        name: String,
         result: Result<tool::ToolResult, E>,
         correlation_id: Option<String>,
     },
