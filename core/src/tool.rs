@@ -55,6 +55,20 @@ impl ToolResult {
             ToolResult::DataFrame(df) => df.label.as_ref(),
         }
     }
+
+    /// Set a label on the result (chainable)
+    pub fn with_label(self, label: Label) -> Self {
+        match self {
+            ToolResult::Text(mut text) => {
+                text.label = Some(label);
+                ToolResult::Text(text)
+            }
+            ToolResult::DataFrame(mut df) => {
+                df.label = Some(label);
+                ToolResult::DataFrame(df)
+            }
+        }
+    }
 }
 
 impl From<Text> for ToolResult {
@@ -66,5 +80,49 @@ impl From<Text> for ToolResult {
 impl From<DataFrame> for ToolResult {
     fn from(df: DataFrame) -> Self {
         ToolResult::DataFrame(df)
+    }
+}
+
+/// Execute a custom tool command, handling JSON parsing and response wrapping
+pub async fn perform<F, Fut, E>(
+    command: String,
+    correlation_id: Option<String>,
+    executor: F,
+) -> crate::Response<E>
+where
+    F: FnOnce(serde_json::Value) -> Fut,
+    Fut: std::future::Future<Output = Result<ToolResult, E>>,
+{
+    let request = match serde_json::from_str::<serde_json::Value>(&command) {
+        Ok(r) => r,
+        Err(_) => {
+            return crate::Response::Error {
+                message: "Invalid JSON in custom command".to_string(),
+                correlation_id,
+            }
+        }
+    };
+
+    let name = match request.get("tool").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => {
+            return crate::Response::Error {
+                message: "Missing 'tool' field in custom command".to_string(),
+                correlation_id,
+            }
+        }
+    };
+
+    match executor(request).await {
+        Ok(result) => crate::Response::ToolResult {
+            name,
+            result: Ok(result),
+            correlation_id,
+        },
+        Err(e) => crate::Response::ToolResult {
+            name,
+            result: Err(e),
+            correlation_id,
+        },
     }
 }

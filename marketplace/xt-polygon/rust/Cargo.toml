@@ -25,3 +25,10 @@ package = "extension:api"
 path = "../../../wit" # path to inboard extension API WIT
 
 [workspace]
+
+# for local dev
+# [patch."https://github.com/inboard-ai/emporium.git"]
+# emporium-core = { path = "../../../core" }
+
+# [patch."https://github.com/inboard-ai/polygon.git"]
+# polygon = { path = "../../../../polygon" }

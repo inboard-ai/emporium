@@ -1,8 +1,8 @@
 //! Command handling for emporium protocol
 
 use alphav::tool_use;
-use emporium_core::{Command, CoreError, Response, tool::ToolResult};
-use serde_json::{Value, json};
+use emporium_core::{Command, CoreError, Response};
+use serde_json::json;
 
 /// Handle emporium protocol commands and return appropriate responses
 pub async fn respond<Client: alphav::Request>(
@@ -39,21 +39,11 @@ pub async fn respond<Client: alphav::Request>(
             });
 
             match tool_use::call_tool(client, request).await {
-                Ok(result) => {
-                    // Create ToolResult based on what alphav returned
-                    let tool_result = match result {
-                        tool_use::ToolCallResult::Text(text) => ToolResult::text(text),
-                        tool_use::ToolCallResult::DataFrame { data, schema, metadata } => {
-                            ToolResult::columnar(data, schema, metadata)
-                        }
-                    };
-
-                    Response::ToolResult {
-                        name,
-                        result: Ok(tool_result),
-                        correlation_id,
-                    }
-                }
+                Ok(tool_result) => Response::ToolResult {
+                    name,
+                    result: Ok(tool_result),
+                    correlation_id,
+                },
                 Err(e) => Response::ToolResult {
                     name,
                     result: Err(CoreError::Custom(format!("{:?}", e))),
@@ -65,41 +55,12 @@ pub async fn respond<Client: alphav::Request>(
             command,
             correlation_id,
         } => {
-            if let Ok(request) = serde_json::from_str::<Value>(&command) {
-                if request.get("tool").is_some() {
-                    match tool_use::call_tool(client, request).await {
-                        // Create ToolResult based on what alphav returned
-                        Ok(result) => {
-                            let tool_result = match result {
-                                tool_use::ToolCallResult::Text(text) => ToolResult::text(text),
-                                tool_use::ToolCallResult::DataFrame { data, schema, metadata } => {
-                                    ToolResult::columnar(data, schema, metadata)
-                                }
-                            };
-                            Response::ToolResult {
-                                name: "custom".to_string(),
-                                result: Ok(tool_result),
-                                correlation_id,
-                            }
-                        }
-                        Err(e) => Response::ToolResult {
-                            name: "custom".to_string(),
-                            result: Err(CoreError::Custom(format!("{:?}", e))),
-                            correlation_id,
-                        },
-                    }
-                } else {
-                    Response::Error {
-                        message: "Invalid custom command format".to_string(),
-                        correlation_id,
-                    }
-                }
-            } else {
-                Response::Error {
-                    message: "Invalid custom command format".to_string(),
-                    correlation_id,
-                }
-            }
+            emporium_core::tool::perform(command, correlation_id, |request| async {
+                tool_use::call_tool(client, request)
+                    .await
+                    .map_err(|e| CoreError::Custom(format!("{:?}", e)))
+            })
+            .await
         }
     }
 }

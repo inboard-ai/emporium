@@ -1,8 +1,8 @@
 //! Command handling for emporium protocol
 
-use emporium_core::{Command, CoreError, Response, tool::ToolResult};
+use emporium_core::{Command, CoreError, Response};
 use polygon::tool_use;
-use serde_json::{Value, json};
+use serde_json::json;
 
 /// Handle emporium protocol commands and return appropriate responses
 pub async fn respond<Client: polygon::Request>(client: &polygon::Polygon<Client>, cmd: Command) -> Response<CoreError> {
@@ -36,21 +36,11 @@ pub async fn respond<Client: polygon::Request>(client: &polygon::Polygon<Client>
             });
 
             match tool_use::call_tool(client, request).await {
-                Ok(result) => {
-                    // Create ToolResult based on what polygon returned
-                    let tool_result = match result {
-                        tool_use::ToolCallResult::Text(text) => ToolResult::text(text),
-                        tool_use::ToolCallResult::DataFrame { data, schema, metadata } => {
-                            ToolResult::columnar(data, schema, metadata)
-                        }
-                    };
-
-                    Response::ToolResult {
-                        name,
-                        result: Ok(tool_result),
-                        correlation_id,
-                    }
-                }
+                Ok(tool_result) => Response::ToolResult {
+                    name,
+                    result: Ok(tool_result),
+                    correlation_id,
+                },
                 Err(e) => Response::ToolResult {
                     name,
                     result: Err(CoreError::Custom(format!("{:?}", e))),
@@ -62,41 +52,12 @@ pub async fn respond<Client: polygon::Request>(client: &polygon::Polygon<Client>
             command,
             correlation_id,
         } => {
-            if let Ok(request) = serde_json::from_str::<Value>(&command) {
-                if request.get("tool").is_some() {
-                    match tool_use::call_tool(client, request).await {
-                        // Create ToolResult based on what polygon returned
-                        Ok(result) => {
-                            let tool_result = match result {
-                                tool_use::ToolCallResult::Text(text) => ToolResult::text(text),
-                                tool_use::ToolCallResult::DataFrame { data, schema, metadata } => {
-                                    ToolResult::columnar(data, schema, metadata)
-                                }
-                            };
-                            Response::ToolResult {
-                                name: "custom".to_string(),
-                                result: Ok(tool_result),
-                                correlation_id,
-                            }
-                        }
-                        Err(e) => Response::ToolResult {
-                            name: "custom".to_string(),
-                            result: Err(CoreError::Custom(format!("{:?}", e))),
-                            correlation_id,
-                        },
-                    }
-                } else {
-                    Response::Error {
-                        message: "Invalid custom command format".to_string(),
-                        correlation_id,
-                    }
-                }
-            } else {
-                Response::Error {
-                    message: "Invalid custom command format".to_string(),
-                    correlation_id,
-                }
-            }
+            emporium_core::tool::perform(command, correlation_id, |request| async {
+                tool_use::call_tool(client, request)
+                    .await
+                    .map_err(|e| CoreError::Custom(format!("{:?}", e)))
+            })
+            .await
         }
     }
 }
