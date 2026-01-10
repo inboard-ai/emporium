@@ -13,7 +13,7 @@ license = "MIT"
 
 # WASM component entry point
 [component]
-entry = "emporium_kv.wasm"
+entry = "extension.wasm"
 world = "kv-provider"
 
 # Configuration schema for instances

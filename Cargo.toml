@@ -7,7 +7,7 @@ authors = ["Andy Terra <tech@andyterra.com>"]
 license = "MIT"
 
 [workspace]
-members = [".", "core", "examples/gui_example"]
+members = [".", "core", "cli", "examples/gui_example"]
 
 [dependencies]
 anyhow = "1.0"

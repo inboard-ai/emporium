@@ -1,0 +1,26 @@
+[package]
+name = "cargo-emporium"
+version = "0.1.0"
+edition = "2024"
+description = "CLI tool for packaging emporium extensions"
+authors = ["Andy Terra <tech@andyterra.com>"]
+license = "MIT"
+
+[[bin]]
+name = "cargo-emporium"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+flate2 = "1"
+tar = "0.4"
+sha2 = "0.10"
+hex = "0.4"
+toml = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+semver = "1"
+chrono = { version = "0.4", features = ["serde"] }
+wasmparser = "0.221"
+thiserror = "1"
+anyhow = "1"
