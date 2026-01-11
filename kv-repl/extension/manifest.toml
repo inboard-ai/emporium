@@ -1,0 +1,15 @@
+[extension]
+id = "kv"
+name = "Key-Value Store"
+version = "0.1.0"
+description = "A simple in-memory key-value store extension"
+author = "Emporium Team"
+license = "MIT"
+keywords = ["kv", "storage", "example"]
+categories = ["storage"]
+
+[component]
+entry = "target/wasm32-wasip1/release/kv_extension.wasm"
+
+[config]
+schema = '{}'

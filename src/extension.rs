@@ -133,7 +133,7 @@ impl Extension {
     /// Get a stream of events from the extension.
     ///
     /// This method takes ownership of the event stream. It can only be called once.
-    pub fn events(&mut self) -> Option<impl Stream<Item = Event>> {
+    pub fn events(&mut self) -> Option<impl Stream<Item = Event> + 'static> {
         self.events.take()
     }
 }

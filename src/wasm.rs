@@ -165,8 +165,6 @@ impl Extension {
                     }
                 };
 
-                eprintln!("Processing command: {}", cmd_json);
-
                 // Pass the JSON string to the extension
                 match instance.call_update(&mut store, instance_resource, &cmd_json).await {
                     Ok(Ok(response_json)) => {
