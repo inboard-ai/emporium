@@ -44,8 +44,8 @@ dotenvy = "0.15"
 # [patch.crates-io]
 # iced.git = "https://github.com/iced-rs/iced.git"
 
-# [patch.'https://github.com/inboard-ai/emporium.git']
-# # emporium-core = { path = "../../../core" }
+[patch."https://github.com/inboard-ai/emporium.git"]
+emporium-core = { path = "core" }
 
 # [patch.'https://github.com/inboard-ai/polygon.git']
 # polygon = { path = "../../../polygon" }

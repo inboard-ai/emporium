@@ -55,3 +55,14 @@ kv-repl/
 2. `build.rs` runs `cargo emporium package` to create the `.empkg` file
 3. The REPL loads the packaged extension and sends commands to it
 4. The extension processes commands and returns responses
+
+## Writing your own extension
+
+Use `extension/` as a template. Your `Cargo.toml` should depend on `emporium-core`:
+
+```toml
+[dependencies]
+emporium-core = { git = "https://github.com/inboard-ai/emporium.git" }
+```
+
+The `[patch]` section in this example is only needed when developing against a local emporium checkout.
