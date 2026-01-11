@@ -7,7 +7,6 @@ use sipper::{Sipper, sipper};
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store};
 
-use crate::Error;
 use crate::data::{Command, Event, Id};
 
 /// Public type aliases for easier consumer access
@@ -20,12 +19,20 @@ pub(crate) struct State {
     http: wasmtime_wasi_http::types::WasiHttpCtx,
 }
 
-// TODO: Arc not Clone?
+/// Internal WASM extension wrapper.
+/// The public API is in [`crate::extension::Extension`].
 #[derive(Clone)]
-pub struct Extension {
+pub(crate) struct Extension {
     id: Id,
     wasm_bytes: Vec<u8>,
     config: String,
+}
+
+impl Extension {
+    /// Create a new WASM extension.
+    pub(crate) fn new(id: Id, wasm_bytes: Vec<u8>, config: String) -> Self {
+        Self { id, wasm_bytes, config }
+    }
 }
 
 pub(crate) mod bindings {
@@ -80,15 +87,9 @@ impl bindings::ExtensionWorldImports for State {
 }
 
 impl Extension {
-    /// Set the configuration JSON for the extension
-    pub fn with_config(mut self, config: String) -> Self {
-        self.config = config;
-        self
-    }
-
     /// Convert the extension into a sipper that emits responses.
     /// The sipper will first emit a Connected response with a message sender.
-    pub fn into_sipper(self) -> impl Sipper<(), Event> {
+    pub(crate) fn into_sipper(self) -> impl Sipper<(), Event> {
         let (msg_tx, mut msg_rx): (Sender, Receiver) = mpsc::unbounded();
 
         sipper(move |mut output| async move {
@@ -207,25 +208,6 @@ impl Extension {
 
             eprintln!("Extension {} message loop ended", self.id);
         })
-    }
-}
-
-/// Load an extension by ID
-pub async fn load(id: Id, config: String, path: std::path::PathBuf) -> Result<Extension, Error> {
-    let wasm_path = if path.extension().and_then(|s| s.to_str()) == Some("wasm") {
-        // Path is already pointing to a WASM file
-        path.to_path_buf()
-    } else {
-        // Path is a directory, look for extension.wasm inside it
-        path.join("extension.wasm")
-    };
-
-    if wasm_path.exists() {
-        let wasm_bytes = std::fs::read(wasm_path)?;
-
-        Ok(Extension { id, wasm_bytes, config })
-    } else {
-        Err(Error::ExtensionNotFound(wasm_path.display().to_string()))
     }
 }
 
