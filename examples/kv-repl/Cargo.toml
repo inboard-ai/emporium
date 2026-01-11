@@ -1,0 +1,11 @@
+[package]
+name = "kv-repl"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+emporium.workspace = true
+futures.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
