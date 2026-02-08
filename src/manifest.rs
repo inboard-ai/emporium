@@ -23,6 +23,8 @@ pub struct Manifest {
     #[serde(default)]
     pub categories: Vec<String>,
     #[serde(default)]
+    pub icon_svg: Option<String>,
+    #[serde(default)]
     pub capabilities: HashMap<String, bool>,
     #[serde(default)]
     pub operations: HashMap<String, String>,
@@ -65,6 +67,8 @@ pub(crate) struct ExtensionSection {
     pub keywords: Vec<String>,
     #[serde(default)]
     pub categories: Vec<String>,
+    #[serde(default)]
+    pub icon_svg: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,6 +124,7 @@ impl RawManifest {
             repository: self.extension.repository,
             keywords: self.extension.keywords,
             categories: self.extension.categories,
+            icon_svg: self.extension.icon_svg,
             capabilities,
             operations,
             config_schema,
