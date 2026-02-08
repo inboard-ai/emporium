@@ -11,10 +11,9 @@ use futures::channel::mpsc;
 use futures::{Stream, StreamExt};
 use tar::Archive;
 
-use crate::Error;
 use crate::data::{Command, Event};
 use crate::manifest::{Manifest, RawManifest};
-use crate::wasm;
+use crate::{Error, wasm};
 
 /// A loaded extension ready to communicate with.
 ///
