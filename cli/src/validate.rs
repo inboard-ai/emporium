@@ -134,7 +134,7 @@ fn validate_extension_section(ext: &ExtensionSection) -> Result<()> {
 fn validate_id(id: &str) -> Result<()> {
     let len = id.len();
 
-    if len < 2 || len > 64 {
+    if !(2..=64).contains(&len) {
         bail!("extension.id must be 2-64 characters, got {} characters", len);
     }
 

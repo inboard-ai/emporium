@@ -114,21 +114,21 @@ impl DataFrame {
                         DataType::Float64 => {
                             let values: Vec<Option<f64>> = arr
                                 .iter()
-                                .map(|item| item.get(&col_def.name).and_then(|v| parse_as_f64(v)))
+                                .map(|item| item.get(&col_def.name).and_then(parse_as_f64))
                                 .collect();
                             Series::new(alias, values)
                         }
                         DataType::Int64 => {
                             let values: Vec<Option<i64>> = arr
                                 .iter()
-                                .map(|item| item.get(&col_def.name).and_then(|v| parse_as_i64(v)))
+                                .map(|item| item.get(&col_def.name).and_then(parse_as_i64))
                                 .collect();
                             Series::new(alias, values)
                         }
                         DataType::Boolean => {
                             let values: Vec<Option<bool>> = arr
                                 .iter()
-                                .map(|item| item.get(&col_def.name).and_then(|v| parse_as_bool(v)))
+                                .map(|item| item.get(&col_def.name).and_then(parse_as_bool))
                                 .collect();
                             Series::new(alias, values)
                         }
@@ -183,16 +183,16 @@ impl DataFrame {
                                         Series::new(alias, parsed)
                                     }
                                     DataType::Float64 => {
-                                        let parsed: Vec<Option<f64>> = values.iter().map(|v| parse_as_f64(v)).collect();
+                                        let parsed: Vec<Option<f64>> = values.iter().map(parse_as_f64).collect();
                                         Series::new(alias, parsed)
                                     }
                                     DataType::Int64 => {
-                                        let parsed: Vec<Option<i64>> = values.iter().map(|v| parse_as_i64(v)).collect();
+                                        let parsed: Vec<Option<i64>> = values.iter().map(parse_as_i64).collect();
                                         Series::new(alias, parsed)
                                     }
                                     DataType::Boolean => {
                                         let parsed: Vec<Option<bool>> =
-                                            values.iter().map(|v| parse_as_bool(v)).collect();
+                                            values.iter().map(parse_as_bool).collect();
                                         Series::new(alias, parsed)
                                     }
                                     _ => {

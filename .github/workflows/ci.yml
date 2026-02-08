@@ -23,8 +23,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo +nightly fmt --check
-      - run: cargo clippy -- -D warnings
-      - run: cargo test
+      - run: cargo clippy -p emporium -p emporium-core -p cargo-emporium -- -D warnings
+      - run: cargo test -p emporium -p emporium-core -p cargo-emporium
 
   audit:
     name: Security audit
