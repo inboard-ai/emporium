@@ -191,8 +191,7 @@ impl DataFrame {
                                         Series::new(alias, parsed)
                                     }
                                     DataType::Boolean => {
-                                        let parsed: Vec<Option<bool>> =
-                                            values.iter().map(parse_as_bool).collect();
+                                        let parsed: Vec<Option<bool>> = values.iter().map(parse_as_bool).collect();
                                         Series::new(alias, parsed)
                                     }
                                     _ => {
