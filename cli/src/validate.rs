@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use semver::Version;
 use serde::Deserialize;
 use std::fs;
@@ -76,8 +76,7 @@ pub fn validate_manifest(path: &Path) -> Result<Manifest> {
     let content = fs::read_to_string(&manifest_path)
         .with_context(|| format!("Failed to read manifest at {}", manifest_path.display()))?;
 
-    let manifest: Manifest = toml::from_str(&content)
-        .with_context(|| "Failed to parse manifest.toml")?;
+    let manifest: Manifest = toml::from_str(&content).with_context(|| "Failed to parse manifest.toml")?;
 
     // Validate required fields in [extension]
     validate_extension_section(&manifest.extension)?;
@@ -110,8 +109,7 @@ fn validate_extension_section(ext: &ExtensionSection) -> Result<()> {
     }
 
     // Validate version is valid SemVer
-    Version::parse(&ext.version)
-        .map_err(|e| anyhow!("extension.version must be valid SemVer: {}", e))?;
+    Version::parse(&ext.version).map_err(|e| anyhow!("extension.version must be valid SemVer: {}", e))?;
 
     // Validate description is not empty
     if ext.description.trim().is_empty() {
@@ -137,10 +135,7 @@ fn validate_id(id: &str) -> Result<()> {
     let len = id.len();
 
     if len < 2 || len > 64 {
-        bail!(
-            "extension.id must be 2-64 characters, got {} characters",
-            len
-        );
+        bail!("extension.id must be 2-64 characters, got {} characters", len);
     }
 
     // Check kebab-case format: lowercase letters, numbers, hyphens
@@ -174,11 +169,9 @@ pub fn validate_wasm(path: &Path) -> Result<()> {
         bail!("WASM file not found at {}", path.display());
     }
 
-    let wasm_bytes = fs::read(path)
-        .with_context(|| format!("Failed to read WASM file at {}", path.display()))?;
+    let wasm_bytes = fs::read(path).with_context(|| format!("Failed to read WASM file at {}", path.display()))?;
 
-    wasmparser::validate(&wasm_bytes)
-        .with_context(|| format!("Invalid WASM file at {}", path.display()))?;
+    wasmparser::validate(&wasm_bytes).with_context(|| format!("Invalid WASM file at {}", path.display()))?;
 
     Ok(())
 }

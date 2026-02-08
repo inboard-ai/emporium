@@ -40,11 +40,7 @@ impl ToolResult {
     }
 
     /// Create columnar data that can be converted to DataFrame on the client
-    pub fn columnar(
-        data: serde_json::Value,
-        schema: crate::Schema,
-        metadata: Option<serde_json::Value>,
-    ) -> Self {
+    pub fn columnar(data: serde_json::Value, schema: crate::Schema, metadata: Option<serde_json::Value>) -> Self {
         ToolResult::DataFrame(DataFrame::new(schema, data, metadata))
     }
 
@@ -84,11 +80,7 @@ impl From<DataFrame> for ToolResult {
 }
 
 /// Execute a custom tool command, handling JSON parsing and response wrapping
-pub async fn perform<F, Fut, E>(
-    command: String,
-    correlation_id: Option<String>,
-    executor: F,
-) -> crate::Response<E>
+pub async fn perform<F, Fut, E>(command: String, correlation_id: Option<String>, executor: F) -> crate::Response<E>
 where
     F: FnOnce(serde_json::Value) -> Fut,
     Fut: std::future::Future<Output = Result<ToolResult, E>>,
@@ -99,7 +91,7 @@ where
             return crate::Response::Error {
                 message: "Invalid JSON in custom command".to_string(),
                 correlation_id,
-            }
+            };
         }
     };
 
@@ -109,7 +101,7 @@ where
             return crate::Response::Error {
                 message: "Missing 'tool' field in custom command".to_string(),
                 correlation_id,
-            }
+            };
         }
     };
 

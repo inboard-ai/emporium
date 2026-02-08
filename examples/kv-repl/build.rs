@@ -37,8 +37,5 @@ fn main() {
 
     // Set the extension path as an environment variable for the binary
     let extension_path = extension_dir.join("kv-0.1.0.empkg");
-    println!(
-        "cargo::rustc-env=KV_EXTENSION_PATH={}",
-        extension_path.display()
-    );
+    println!("cargo::rustc-env=KV_EXTENSION_PATH={}", extension_path.display());
 }

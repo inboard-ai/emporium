@@ -144,10 +144,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         ext.send(command)?;
 
         // Wait for response with timeout
-        let response = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            wait_for_response(&mut events),
-        ).await;
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), wait_for_response(&mut events)).await;
 
         match response {
             Ok(Some(resp)) => print_response(resp),
@@ -176,26 +173,24 @@ fn print_response(response: Response) {
                 println!("  {} - {}", tool.name, tool.description);
             }
         }
-        Response::ToolResult { name, result, .. } => {
-            match result {
-                Ok(r) => {
-                    use emporium::data::core::tool::ToolResult;
-                    match r {
-                        ToolResult::Text(text) => {
-                            if text.content == "null" || text.content.is_empty() {
-                                println!("OK");
-                            } else {
-                                println!("{}", text.content);
-                            }
-                        }
-                        ToolResult::DataFrame(df) => {
-                            println!("DataFrame with {} columns", df.schema.len());
+        Response::ToolResult { name, result, .. } => match result {
+            Ok(r) => {
+                use emporium::data::core::tool::ToolResult;
+                match r {
+                    ToolResult::Text(text) => {
+                        if text.content == "null" || text.content.is_empty() {
+                            println!("OK");
+                        } else {
+                            println!("{}", text.content);
                         }
                     }
+                    ToolResult::DataFrame(df) => {
+                        println!("DataFrame with {} columns", df.schema.len());
+                    }
                 }
-                Err(e) => println!("Error from '{}': {}", name, e),
             }
-        }
+            Err(e) => println!("Error from '{}': {}", name, e),
+        },
         Response::Error { message, .. } => {
             println!("Error: {}", message);
         }

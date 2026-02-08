@@ -183,13 +183,11 @@ impl DataFrame {
                                         Series::new(alias, parsed)
                                     }
                                     DataType::Float64 => {
-                                        let parsed: Vec<Option<f64>> =
-                                            values.iter().map(|v| parse_as_f64(v)).collect();
+                                        let parsed: Vec<Option<f64>> = values.iter().map(|v| parse_as_f64(v)).collect();
                                         Series::new(alias, parsed)
                                     }
                                     DataType::Int64 => {
-                                        let parsed: Vec<Option<i64>> =
-                                            values.iter().map(|v| parse_as_i64(v)).collect();
+                                        let parsed: Vec<Option<i64>> = values.iter().map(|v| parse_as_i64(v)).collect();
                                         Series::new(alias, parsed)
                                     }
                                     DataType::Boolean => {
@@ -243,9 +241,7 @@ impl DataFrame {
                         // Column not found in data, create empty column with nulls
                         // We'll resize it to max_rows after processing all columns
                         let series = match dtype {
-                            DataType::String | DataType::Date => {
-                                Series::new(alias, Vec::<Option<String>>::new())
-                            }
+                            DataType::String | DataType::Date => Series::new(alias, Vec::<Option<String>>::new()),
                             DataType::Float64 => Series::new(alias, Vec::<Option<f64>>::new()),
                             DataType::Int64 => Series::new(alias, Vec::<Option<i64>>::new()),
                             DataType::Boolean => Series::new(alias, Vec::<Option<bool>>::new()),
@@ -266,18 +262,10 @@ impl DataFrame {
                                 let dtype = series.dtype();
                                 let name = series.name().clone();
                                 let new_series = match dtype {
-                                    DataType::String => {
-                                        Series::new(name, vec![Option::<String>::None; max_rows])
-                                    }
-                                    DataType::Float64 => {
-                                        Series::new(name, vec![Option::<f64>::None; max_rows])
-                                    }
-                                    DataType::Int64 => {
-                                        Series::new(name, vec![Option::<i64>::None; max_rows])
-                                    }
-                                    DataType::Boolean => {
-                                        Series::new(name, vec![Option::<bool>::None; max_rows])
-                                    }
+                                    DataType::String => Series::new(name, vec![Option::<String>::None; max_rows]),
+                                    DataType::Float64 => Series::new(name, vec![Option::<f64>::None; max_rows]),
+                                    DataType::Int64 => Series::new(name, vec![Option::<i64>::None; max_rows]),
+                                    DataType::Boolean => Series::new(name, vec![Option::<bool>::None; max_rows]),
                                     _ => Series::new(name, vec![Option::<String>::None; max_rows]),
                                 };
                                 *series = new_series.into();

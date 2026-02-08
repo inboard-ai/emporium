@@ -2,7 +2,7 @@ use futures::channel::mpsc;
 
 // Re-export all core types
 pub use emporium_core as core;
-pub use emporium_core::{tool, ColumnDef, Command, CoreError, Id, Response, Schema, ToolInfo};
+pub use emporium_core::{ColumnDef, Command, CoreError, Id, Response, Schema, ToolInfo, tool};
 
 /// Extended Response type with emporium-specific variants
 #[derive(Debug, Clone)]

@@ -1,7 +1,6 @@
 **/target
 **/.vscode
 docs/
-Cargo.lock
 .env
 
 .*.md

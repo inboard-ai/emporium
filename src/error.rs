@@ -78,7 +78,6 @@ impl From<&str> for Error {
     }
 }
 
-
 impl From<crate::data::CoreError> for Error {
     fn from(err: crate::data::CoreError) -> Self {
         Error::Custom(err.to_string())

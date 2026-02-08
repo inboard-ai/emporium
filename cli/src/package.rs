@@ -1,8 +1,8 @@
 use crate::validate::{validate_manifest, validate_wasm};
 use anyhow::{Context, Result};
 use chrono::Utc;
-use flate2::write::GzEncoder;
 use flate2::Compression;
+use flate2::write::GzEncoder;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::Write;
@@ -22,7 +22,10 @@ pub fn create_package(extension_path: &Path, output_path: &Path) -> Result<()> {
 
     // Validate manifest
     let manifest = validate_manifest(&extension_path)?;
-    println!("  Manifest validated: {} v{}", manifest.extension.name, manifest.extension.version);
+    println!(
+        "  Manifest validated: {} v{}",
+        manifest.extension.name, manifest.extension.version
+    );
 
     // Locate and validate WASM file
     let wasm_path = extension_path.join(&manifest.component.entry);
@@ -30,8 +33,8 @@ pub fn create_package(extension_path: &Path, output_path: &Path) -> Result<()> {
     println!("  WASM validated: {}", manifest.component.entry);
 
     // Compute WASM checksum
-    let wasm_bytes = fs::read(&wasm_path)
-        .with_context(|| format!("Failed to read WASM file: {}", wasm_path.display()))?;
+    let wasm_bytes =
+        fs::read(&wasm_path).with_context(|| format!("Failed to read WASM file: {}", wasm_path.display()))?;
     let checksum = compute_sha256(&wasm_bytes);
     println!("  Checksum: {}", checksum);
 
@@ -72,14 +75,8 @@ fn create_enhanced_manifest(extension_path: &Path, checksum: &str) -> Result<Str
 
     // Create package section
     let mut package = toml::Table::new();
-    package.insert(
-        "created_at".to_string(),
-        toml::Value::String(Utc::now().to_rfc3339()),
-    );
-    package.insert(
-        "checksum_sha256".to_string(),
-        toml::Value::String(checksum.to_string()),
-    );
+    package.insert("created_at".to_string(), toml::Value::String(Utc::now().to_rfc3339()));
+    package.insert("checksum_sha256".to_string(), toml::Value::String(checksum.to_string()));
     package.insert(
         "packager_version".to_string(),
         toml::Value::String(PACKAGER_VERSION.to_string()),
@@ -112,21 +109,13 @@ fn create_tar_gz(
     )?;
 
     // Add extension.wasm
-    add_bytes_to_archive(
-        &mut archive,
-        &format!("{}/extension.wasm", package_name),
-        wasm_bytes,
-    )?;
+    add_bytes_to_archive(&mut archive, &format!("{}/extension.wasm", package_name), wasm_bytes)?;
 
     // Add optional README.md
     let readme_path = extension_path.join("README.md");
     if readme_path.exists() {
         let readme = fs::read(&readme_path)?;
-        add_bytes_to_archive(
-            &mut archive,
-            &format!("{}/README.md", package_name),
-            &readme,
-        )?;
+        add_bytes_to_archive(&mut archive, &format!("{}/README.md", package_name), &readme)?;
         println!("  Added: README.md");
     }
 
@@ -134,11 +123,7 @@ fn create_tar_gz(
     let license_path = extension_path.join("LICENSE");
     if license_path.exists() {
         let license = fs::read(&license_path)?;
-        add_bytes_to_archive(
-            &mut archive,
-            &format!("{}/LICENSE", package_name),
-            &license,
-        )?;
+        add_bytes_to_archive(&mut archive, &format!("{}/LICENSE", package_name), &license)?;
         println!("  Added: LICENSE");
     }
 
@@ -155,11 +140,7 @@ fn create_tar_gz(
 }
 
 /// Add bytes as a file to the archive
-fn add_bytes_to_archive<W: Write>(
-    archive: &mut Builder<W>,
-    path: &str,
-    data: &[u8],
-) -> Result<()> {
+fn add_bytes_to_archive<W: Write>(archive: &mut Builder<W>, path: &str, data: &[u8]) -> Result<()> {
     let mut header = tar::Header::new_gnu();
     header.set_size(data.len() as u64);
     header.set_mode(0o644);

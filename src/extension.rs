@@ -11,10 +11,10 @@ use futures::channel::mpsc;
 use futures::{Stream, StreamExt};
 use tar::Archive;
 
+use crate::Error;
 use crate::data::{Command, Event};
 use crate::manifest::{Manifest, RawManifest};
 use crate::wasm;
-use crate::Error;
 
 /// A loaded extension ready to communicate with.
 ///
@@ -32,19 +32,13 @@ impl Extension {
     ///
     /// The `config` parameter provides settings for the extension (e.g., API keys).
     /// The schema for required settings is available via [`Extension::manifest`].
-    pub async fn load(
-        path: impl AsRef<Path>,
-        config: serde_json::Value,
-    ) -> Result<Self, Error> {
+    pub async fn load(path: impl AsRef<Path>, config: serde_json::Value) -> Result<Self, Error> {
         let bytes = tokio::fs::read(path.as_ref()).await?;
         Self::from_bytes(&bytes, config).await
     }
 
     /// Load an extension from package bytes (e.g., downloaded from a store).
-    pub async fn from_bytes(
-        bytes: &[u8],
-        config: serde_json::Value,
-    ) -> Result<Self, Error> {
+    pub async fn from_bytes(bytes: &[u8], config: serde_json::Value) -> Result<Self, Error> {
         // Extract manifest and WASM from the package
         let (manifest, wasm_bytes) = extract_package(bytes)?;
 
@@ -121,13 +115,14 @@ impl Extension {
 
     /// Send a command to the extension.
     pub fn send(&self, command: Command) -> Result<(), Error> {
-        let sender = self.sender.as_ref().ok_or_else(|| {
-            Error::Custom("Extension not connected".into())
-        })?;
+        let sender = self
+            .sender
+            .as_ref()
+            .ok_or_else(|| Error::Custom("Extension not connected".into()))?;
 
-        sender.unbounded_send(command).map_err(|e| {
-            Error::Custom(format!("Failed to send command: {}", e))
-        })
+        sender
+            .unbounded_send(command)
+            .map_err(|e| Error::Custom(format!("Failed to send command: {}", e)))
     }
 
     /// Get a stream of events from the extension.
@@ -157,32 +152,37 @@ fn extract_package(bytes: &[u8]) -> Result<(Manifest, Vec<u8>), Error> {
     let mut manifest_content: Option<String> = None;
     let mut wasm_bytes: Option<Vec<u8>> = None;
 
-    for entry in archive.entries().map_err(|e| Error::Custom(format!("Invalid package: {}", e)))? {
+    for entry in archive
+        .entries()
+        .map_err(|e| Error::Custom(format!("Invalid package: {}", e)))?
+    {
         let mut entry = entry.map_err(|e| Error::Custom(format!("Invalid package entry: {}", e)))?;
-        let path = entry.path().map_err(|e| Error::Custom(format!("Invalid path: {}", e)))?;
+        let path = entry
+            .path()
+            .map_err(|e| Error::Custom(format!("Invalid path: {}", e)))?;
         let path_str = path.to_string_lossy();
 
         if path_str.ends_with("manifest.toml") {
             let mut content = String::new();
-            entry.read_to_string(&mut content)
+            entry
+                .read_to_string(&mut content)
                 .map_err(|e| Error::Custom(format!("Failed to read manifest: {}", e)))?;
             manifest_content = Some(content);
         } else if path_str.ends_with(".wasm") {
             let mut bytes = Vec::new();
-            entry.read_to_end(&mut bytes)
+            entry
+                .read_to_end(&mut bytes)
                 .map_err(|e| Error::Custom(format!("Failed to read WASM: {}", e)))?;
             wasm_bytes = Some(bytes);
         }
     }
 
-    let manifest_content = manifest_content
-        .ok_or_else(|| Error::Custom("Package missing manifest.toml".into()))?;
-    let wasm_bytes = wasm_bytes
-        .ok_or_else(|| Error::Custom("Package missing WASM file".into()))?;
+    let manifest_content = manifest_content.ok_or_else(|| Error::Custom("Package missing manifest.toml".into()))?;
+    let wasm_bytes = wasm_bytes.ok_or_else(|| Error::Custom("Package missing WASM file".into()))?;
 
     // Parse the manifest
-    let raw: RawManifest = toml::from_str(&manifest_content)
-        .map_err(|e| Error::Custom(format!("Invalid manifest: {}", e)))?;
+    let raw: RawManifest =
+        toml::from_str(&manifest_content).map_err(|e| Error::Custom(format!("Invalid manifest: {}", e)))?;
     let manifest = raw.into_manifest()?;
 
     Ok((manifest, wasm_bytes))

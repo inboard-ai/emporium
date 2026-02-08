@@ -139,7 +139,6 @@ pub struct ToolInfo {
     pub schema: Value,
 }
 
-
 /// A response received FROM an extension
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload")]

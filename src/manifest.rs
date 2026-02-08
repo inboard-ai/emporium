@@ -91,26 +91,30 @@ impl RawManifest {
             .map_err(|e| crate::Error::Custom(format!("Invalid config schema JSON: {}", e)))?;
 
         // Convert operations to HashMap<String, String>
-        let operations = self.operations.map(|ops| {
-            ops.into_iter()
-                .filter_map(|(k, v)| {
-                    if k == "required" {
-                        None // Skip the "required" key
-                    } else {
-                        Some((k, v.as_str().unwrap_or("").to_string()))
-                    }
-                })
-                .collect()
-        }).unwrap_or_default();
+        let operations = self
+            .operations
+            .map(|ops| {
+                ops.into_iter()
+                    .filter_map(|(k, v)| {
+                        if k == "required" {
+                            None // Skip the "required" key
+                        } else {
+                            Some((k, v.as_str().unwrap_or("").to_string()))
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
         // Convert capabilities to HashMap<String, bool>
-        let capabilities = self.capabilities.map(|caps| {
-            caps.into_iter()
-                .filter_map(|(k, v)| {
-                    v.as_bool().map(|b| (k, b))
-                })
-                .collect()
-        }).unwrap_or_default();
+        let capabilities = self
+            .capabilities
+            .map(|caps| {
+                caps.into_iter()
+                    .filter_map(|(k, v)| v.as_bool().map(|b| (k, b)))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         Ok(Manifest {
             id: self.extension.id,
