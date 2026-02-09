@@ -1,11 +1,10 @@
 //! WASM extension support
-use std::pin::Pin;
-
 use futures::StreamExt;
 use futures::channel::mpsc;
 use sipper::{Sipper, sipper};
-use wasmtime::component::{Component, Linker};
+use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
+use wasmtime_wasi::WasiCtxView;
 
 use crate::data::{Command, Event, Id};
 
@@ -14,9 +13,9 @@ pub type Sender = futures::channel::mpsc::UnboundedSender<Command>;
 pub type Receiver = futures::channel::mpsc::UnboundedReceiver<Command>;
 
 pub(crate) struct State {
-    table: wasmtime_wasi::ResourceTable,
+    table: ResourceTable,
     wasi: wasmtime_wasi::WasiCtx,
-    http: wasmtime_wasi_http::types::WasiHttpCtx,
+    http: wasmtime_wasi_http::WasiHttpCtx,
 }
 
 /// Internal WASM extension wrapper.
@@ -40,49 +39,39 @@ pub(crate) mod bindings {
     wasmtime::component::bindgen!({
         path: "./wit",
         world: "extension-world",
-        async: true,
+        imports: { default: async },
+        exports: { default: async },
     });
 }
 
 // Implement the types::Host trait (empty trait required by add_to_linker)
 impl bindings::emporium::extensions::types::Host for State {}
 
-// Implement WasiView for State so WASI can access the context
+// Implement WasiView for State so WASI can access the context and resource table
 impl wasmtime_wasi::WasiView for State {
-    fn table(&mut self) -> &mut wasmtime_wasi::ResourceTable {
-        &mut self.table
-    }
-
-    fn ctx(&mut self) -> &mut wasmtime_wasi::WasiCtx {
-        &mut self.wasi
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi,
+            table: &mut self.table,
+        }
     }
 }
 
 // Implement WasiHttpView for State to enable HTTP support
-impl wasmtime_wasi_http::types::WasiHttpView for State {
-    fn table(&mut self) -> &mut wasmtime_wasi::ResourceTable {
-        &mut self.table
+impl wasmtime_wasi_http::WasiHttpView for State {
+    fn ctx(&mut self) -> &mut wasmtime_wasi_http::WasiHttpCtx {
+        &mut self.http
     }
 
-    fn ctx(&mut self) -> &mut wasmtime_wasi_http::types::WasiHttpCtx {
-        &mut self.http
+    fn table(&mut self) -> &mut ResourceTable {
+        &mut self.table
     }
 }
 
 // Implement the log function that extensions can call
 impl bindings::ExtensionWorldImports for State {
-    fn log<'a, 'b>(
-        &'a mut self,
-        level: String,
-        message: String,
-    ) -> Pin<Box<dyn futures::Future<Output = ()> + Send + 'b>>
-    where
-        'a: 'b,
-        Self: 'b,
-    {
-        Box::pin(async move {
-            eprintln!("[{}] {}", level, message);
-        })
+    async fn log(&mut self, level: String, message: String) {
+        eprintln!("[{}] {}", level, message);
     }
 }
 
@@ -100,10 +89,10 @@ impl Extension {
 
             // Set up the WASM instance
             let mut linker = Linker::new(&engine);
-            bindings::ExtensionWorld::add_to_linker(&mut linker, |state: &mut State| state).unwrap();
+            bindings::ExtensionWorld::add_to_linker::<_, HasSelf<_>>(&mut linker, |state: &mut State| state).unwrap();
 
             // Add WASI support
-            wasmtime_wasi::add_to_linker_async(&mut linker).unwrap();
+            wasmtime_wasi::p2::add_to_linker_async(&mut linker).unwrap();
 
             // Add WASI HTTP support
             wasmtime_wasi_http::add_only_http_to_linker_async(&mut linker).unwrap();
@@ -112,9 +101,9 @@ impl Extension {
             let wasi = wasmtime_wasi::WasiCtxBuilder::new().inherit_stdio().build();
 
             let mut store = Store::new(&engine, State {
-                table: wasmtime_wasi::ResourceTable::new(),
+                table: ResourceTable::new(),
                 wasi,
-                http: wasmtime_wasi_http::types::WasiHttpCtx::new(),
+                http: wasmtime_wasi_http::WasiHttpCtx::new(),
             });
 
             let bindings = bindings::ExtensionWorld::instantiate_async(&mut store, &component, &linker)
