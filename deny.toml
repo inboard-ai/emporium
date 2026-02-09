@@ -1,9 +1,6 @@
 [advisories]
 unmaintained = "workspace"
 yanked = "warn"
-# wasmtime 27.x has two CVEs with no patch in this major version.
-# Needs upgrade to >=34.0.2 — tracked separately.
-ignore = ["RUSTSEC-2025-0046", "RUSTSEC-2025-0118"]
 
 [licenses]
 allow = [
