@@ -748,6 +748,7 @@ dependencies = [
  "anyhow",
  "dotenvy",
  "emporium-core",
+ "emporium-types",
  "flate2",
  "futures",
  "polars-core",
@@ -769,10 +770,19 @@ dependencies = [
 name = "emporium-core"
 version = "0.0.1"
 dependencies = [
+ "emporium-types",
  "polars-core",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "emporium-types"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

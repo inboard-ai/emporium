@@ -26,6 +26,7 @@ mod wasm;
 
 // Re-exports
 pub use data::{Command, Event};
+pub use emporium_types::ManifestTool;
 pub use error::Error;
 pub use extension::Extension;
 pub use manifest::Manifest;

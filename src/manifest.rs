@@ -1,5 +1,6 @@
 //! Extension manifest types.
 
+use emporium_types::ManifestTool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -23,11 +24,11 @@ pub struct Manifest {
     #[serde(default)]
     pub categories: Vec<String>,
     #[serde(default)]
-    pub icon_svg: Option<String>,
+    pub features: Vec<String>,
     #[serde(default)]
     pub capabilities: HashMap<String, bool>,
     #[serde(default)]
-    pub operations: HashMap<String, String>,
+    pub tools: Vec<ManifestTool>,
     /// JSON Schema for extension configuration/settings
     pub config_schema: serde_json::Value,
     /// WASM component entry point (internal use)
@@ -36,12 +37,23 @@ pub struct Manifest {
     pub(crate) component_entry: String,
 }
 
+/// Raw tool entry from [[tools]] TOML array-of-tables.
+#[derive(Debug, Deserialize)]
+pub(crate) struct RawTool {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+}
+
 /// Raw manifest as stored in manifest.toml
 #[derive(Debug, Deserialize)]
 pub(crate) struct RawManifest {
     pub extension: ExtensionSection,
     pub component: ComponentSection,
     pub config: ConfigSection,
+    #[serde(default)]
+    pub tools: Option<Vec<RawTool>>,
+    /// Kept for backward compatibility during migration.
     #[serde(default)]
     pub operations: Option<HashMap<String, toml::Value>>,
     #[serde(default)]
@@ -68,7 +80,7 @@ pub(crate) struct ExtensionSection {
     #[serde(default)]
     pub categories: Vec<String>,
     #[serde(default)]
-    pub icon_svg: Option<String>,
+    pub features: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,21 +102,28 @@ impl RawManifest {
         let config_schema: serde_json::Value = serde_json::from_str(&self.config.schema)
             .map_err(|e| crate::Error::Custom(format!("Invalid config schema JSON: {}", e)))?;
 
-        // Convert operations to HashMap<String, String>
-        let operations = self
-            .operations
-            .map(|ops| {
-                ops.into_iter()
-                    .filter_map(|(k, v)| {
-                        if k == "required" {
-                            None // Skip the "required" key
-                        } else {
-                            Some((k, v.as_str().unwrap_or("").to_string()))
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        // Parse [[tools]] entries, falling back to old [operations] for backward compat
+        let tools = if let Some(raw_tools) = self.tools {
+            raw_tools
+                .into_iter()
+                .map(|t| ManifestTool {
+                    id: t.id,
+                    name: t.name,
+                    description: t.description,
+                })
+                .collect()
+        } else if let Some(ops) = &self.operations {
+            ops.iter()
+                .filter(|(k, _)| k.as_str() != "required")
+                .map(|(k, v)| ManifestTool {
+                    id: k.clone(),
+                    name: k.clone(),
+                    description: v.as_str().unwrap_or("").to_string(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         // Convert capabilities to HashMap<String, bool>
         let capabilities = self
@@ -128,9 +147,9 @@ impl RawManifest {
             repository: self.extension.repository,
             keywords: self.extension.keywords,
             categories: self.extension.categories,
-            icon_svg: self.extension.icon_svg,
+            features: self.extension.features,
             capabilities,
-            operations,
+            tools,
             config_schema,
             component_entry: self.component.entry,
         })

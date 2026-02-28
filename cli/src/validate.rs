@@ -12,6 +12,8 @@ pub struct Manifest {
     pub component: ComponentSection,
     pub config: ConfigSection,
     #[serde(default)]
+    pub tools: Option<Vec<toml::Table>>,
+    #[serde(default)]
     pub operations: Option<toml::Table>,
     #[serde(default)]
     pub capabilities: Option<toml::Table>,
@@ -94,6 +96,25 @@ pub fn validate_manifest(path: &Path) -> Result<Manifest> {
     // Validate schema is valid JSON
     serde_json::from_str::<serde_json::Value>(&manifest.config.schema)
         .with_context(|| "config.schema must be valid JSON")?;
+
+    // Validate [[tools]] entries if present
+    if let Some(ref tools) = manifest.tools {
+        for (i, tool) in tools.iter().enumerate() {
+            let id = tool.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            let name = tool.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let description = tool.get("description").and_then(|v| v.as_str()).unwrap_or("");
+
+            if id.is_empty() {
+                bail!("tools[{}].id is required and cannot be empty", i);
+            }
+            if name.is_empty() {
+                bail!("tools[{}].name is required and cannot be empty", i);
+            }
+            if description.is_empty() {
+                bail!("tools[{}].description is required and cannot be empty", i);
+            }
+        }
+    }
 
     Ok(manifest)
 }

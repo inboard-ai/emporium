@@ -111,6 +111,24 @@ fn create_tar_gz(
     // Add extension.wasm
     add_bytes_to_archive(&mut archive, &format!("{}/extension.wasm", package_name), wasm_bytes)?;
 
+    // Add required icon file (icon.svg or icon.png)
+    let icon_svg_path = extension_path.join("icon.svg");
+    let icon_png_path = extension_path.join("icon.png");
+    if icon_svg_path.exists() {
+        let icon = fs::read(&icon_svg_path)?;
+        add_bytes_to_archive(&mut archive, &format!("{}/icon.svg", package_name), &icon)?;
+        println!("  Added: icon.svg");
+    } else if icon_png_path.exists() {
+        let icon = fs::read(&icon_png_path)?;
+        add_bytes_to_archive(&mut archive, &format!("{}/icon.png", package_name), &icon)?;
+        println!("  Added: icon.png");
+    } else {
+        anyhow::bail!(
+            "Extension must include an icon file (icon.svg or icon.png) at {}",
+            extension_path.display()
+        );
+    }
+
     // Add optional README.md
     let readme_path = extension_path.join("README.md");
     if readme_path.exists() {

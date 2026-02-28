@@ -235,10 +235,19 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 name = "emporium-core"
 version = "0.0.1"
 dependencies = [
+ "emporium-types",
  "polars-core",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "emporium-types"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

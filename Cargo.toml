@@ -7,11 +7,12 @@ authors = ["Andy Terra <tech@andyterra.com>"]
 license = "MIT"
 
 [workspace]
-members = [".", "core", "cli", "examples/*"]
+members = [".", "core", "cli", "types", "examples/*"]
 
 [workspace.dependencies]
 emporium = { path = "." }
 emporium-core = { path = "core" }
+emporium-types = { path = "types" }
 futures = "0.3"
 serde_json = "1.0"
 tokio = { version = "1", features = ["full"] }
@@ -19,6 +20,7 @@ tokio = { version = "1", features = ["full"] }
 [dependencies]
 anyhow = "1.0"
 emporium-core.workspace = true
+emporium-types.workspace = true
 flate2 = "1"
 futures = { version = "0.3", default-features = false }
 polars-core = { version = "0.51", default-features = false }

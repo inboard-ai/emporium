@@ -2,6 +2,8 @@
 
 pub mod tool;
 
+pub use emporium_types::ManifestTool;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
