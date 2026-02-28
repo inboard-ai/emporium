@@ -100,14 +100,11 @@ impl Extension {
             // Create WASI context
             let wasi = wasmtime_wasi::WasiCtxBuilder::new().inherit_stdio().build();
 
-            let mut store = Store::new(
-                &engine,
-                State {
-                    table: ResourceTable::new(),
-                    wasi,
-                    http: wasmtime_wasi_http::WasiHttpCtx::new(),
-                },
-            );
+            let mut store = Store::new(&engine, State {
+                table: ResourceTable::new(),
+                wasi,
+                http: wasmtime_wasi_http::WasiHttpCtx::new(),
+            });
 
             let bindings = bindings::ExtensionWorld::instantiate_async(&mut store, &component, &linker)
                 .await
