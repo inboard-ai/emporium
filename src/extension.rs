@@ -112,6 +112,11 @@ impl Extension {
         self.config = config;
     }
 
+    /// Get a clone of the command sender, if connected.
+    pub fn sender(&self) -> Option<mpsc::UnboundedSender<Command>> {
+        self.sender.clone()
+    }
+
     /// Send a command to the extension.
     pub fn send(&self, command: Command) -> Result<(), Error> {
         let sender = self
