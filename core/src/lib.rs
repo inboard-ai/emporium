@@ -139,6 +139,9 @@ pub struct ToolInfo {
     pub description: String,
     /// JSON Schema for the tool's parameters
     pub schema: Value,
+    /// Whether results from this tool should be cached as project-level resources.
+    #[serde(default)]
+    pub cacheable: bool,
 }
 
 /// A response received FROM an extension
