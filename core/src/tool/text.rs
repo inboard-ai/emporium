@@ -10,6 +10,9 @@ pub struct Text {
     pub content: String,
     /// Optional label for display (e.g., "AAPL" for stock data)
     pub label: Option<Label>,
+    /// Human-readable description of the invocation (e.g., the SQL query)
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 impl Text {
@@ -18,6 +21,7 @@ impl Text {
         Self {
             content: content.into(),
             label: None,
+            source: None,
         }
     }
 
@@ -26,6 +30,7 @@ impl Text {
         Self {
             content: content.into(),
             label: Some(label),
+            source: None,
         }
     }
 }

@@ -14,6 +14,9 @@ pub struct DataFrame {
     pub metadata: Option<Value>,
     /// Optional label for display (e.g., "AAPL" for stock data)
     pub label: Option<Label>,
+    /// Human-readable description of the invocation (e.g., the SQL query)
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 impl DataFrame {
@@ -24,6 +27,7 @@ impl DataFrame {
             data,
             metadata,
             label: None,
+            source: None,
         }
     }
 
@@ -34,6 +38,7 @@ impl DataFrame {
             data,
             metadata,
             label: Some(label),
+            source: None,
         }
     }
 

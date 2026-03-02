@@ -65,6 +65,29 @@ impl ToolResult {
             }
         }
     }
+
+    /// Get the source description from the result, if any
+    pub fn source(&self) -> Option<&str> {
+        match self {
+            ToolResult::Text(text) => text.source.as_deref(),
+            ToolResult::DataFrame(df) => df.source.as_deref(),
+        }
+    }
+
+    /// Set a human-readable source description (chainable)
+    pub fn with_source(self, source: impl Into<String>) -> Self {
+        let source = source.into();
+        match self {
+            ToolResult::Text(mut text) => {
+                text.source = Some(source);
+                ToolResult::Text(text)
+            }
+            ToolResult::DataFrame(mut df) => {
+                df.source = Some(source);
+                ToolResult::DataFrame(df)
+            }
+        }
+    }
 }
 
 impl From<Text> for ToolResult {
