@@ -24,3 +24,4 @@ chrono = { version = "0.4", features = ["serde"] }
 wasmparser = "0.221"
 thiserror = "1"
 anyhow = "1"
+ureq = "2"

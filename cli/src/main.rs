@@ -1,3 +1,5 @@
+mod build;
+mod check;
 mod package;
 mod validate;
 
@@ -25,6 +27,17 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum EmporiumCommands {
+    /// Build the extension WASM binary
+    Build {
+        /// Path to the extension directory (defaults to current directory)
+        #[arg(short, long)]
+        path: Option<PathBuf>,
+
+        /// Build in debug mode instead of release
+        #[arg(long)]
+        debug: bool,
+    },
+
     /// Package an extension into an .empkg archive
     Package {
         /// Path to the extension directory (defaults to current directory)
@@ -42,6 +55,17 @@ enum EmporiumCommands {
         #[arg(short, long)]
         path: Option<PathBuf>,
     },
+
+    /// Check if the current version is available for publishing
+    Check {
+        /// Path to the extension directory (defaults to current directory)
+        #[arg(short, long)]
+        path: Option<PathBuf>,
+
+        /// Registry URL to check against
+        #[arg(short, long)]
+        registry: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -49,6 +73,10 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Emporium { command } => match command {
+            EmporiumCommands::Build { path, debug } => {
+                let extension_path = path.unwrap_or_else(|| PathBuf::from("."));
+                build::build_extension(&extension_path, !debug)?;
+            }
             EmporiumCommands::Package { path, output } => {
                 let extension_path = path.unwrap_or_else(|| PathBuf::from("."));
                 let output_path = output.unwrap_or_else(|| PathBuf::from("."));
@@ -58,6 +86,10 @@ fn main() -> Result<()> {
                 let extension_path = path.unwrap_or_else(|| PathBuf::from("."));
                 validate::validate_extension(&extension_path)?;
                 println!("Extension is valid!");
+            }
+            EmporiumCommands::Check { path, registry } => {
+                let extension_path = path.unwrap_or_else(|| PathBuf::from("."));
+                check::check_registry(&extension_path, &registry)?;
             }
         },
     }
