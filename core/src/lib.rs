@@ -128,6 +128,18 @@ impl Command {
     }
 }
 
+/// Display hints for live/completed status of a tool invocation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Activity {
+    /// Verb shown during execution (e.g. "Querying")
+    pub present: String,
+    /// Verb shown after completion (e.g. "Queried")
+    pub past: String,
+    /// JSON pointer into the tool's input params to extract a display subject.
+    /// Empty string if no subject.
+    pub subject_field: String,
+}
+
 /// Tool information provided by an extension
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolInfo {
@@ -142,6 +154,9 @@ pub struct ToolInfo {
     /// Whether results from this tool should be cached as project-level resources.
     #[serde(default)]
     pub cacheable: bool,
+    /// Optional display hints for live/completed status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<Activity>,
 }
 
 /// A response received FROM an extension

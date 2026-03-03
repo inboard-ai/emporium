@@ -6,6 +6,7 @@ pub use emporium_core::{ColumnDef, Command, CoreError, Id, Response, Schema, Too
 
 /// Extended Response type with emporium-specific variants
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum Event {
     /// Connection established with command sender
     Connected(mpsc::UnboundedSender<Command>),
