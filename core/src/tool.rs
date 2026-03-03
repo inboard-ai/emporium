@@ -88,6 +88,28 @@ impl ToolResult {
             }
         }
     }
+
+    /// Get the per-result store override, if any
+    pub fn store(&self) -> Option<bool> {
+        match self {
+            ToolResult::Text(text) => text.store,
+            ToolResult::DataFrame(df) => df.store,
+        }
+    }
+
+    /// Set a per-result store override (chainable)
+    pub fn with_store(self, store: bool) -> Self {
+        match self {
+            ToolResult::Text(mut text) => {
+                text.store = Some(store);
+                ToolResult::Text(text)
+            }
+            ToolResult::DataFrame(mut df) => {
+                df.store = Some(store);
+                ToolResult::DataFrame(df)
+            }
+        }
+    }
 }
 
 impl From<Text> for ToolResult {

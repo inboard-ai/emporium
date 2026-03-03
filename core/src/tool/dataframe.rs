@@ -17,6 +17,9 @@ pub struct DataFrame {
     /// Human-readable description of the invocation (e.g., the SQL query)
     #[serde(default)]
     pub source: Option<String>,
+    /// Per-result cache override — when set, overrides `ToolInfo.cacheable`
+    #[serde(default)]
+    pub store: Option<bool>,
 }
 
 impl DataFrame {
@@ -28,6 +31,7 @@ impl DataFrame {
             metadata,
             label: None,
             source: None,
+            store: None,
         }
     }
 
@@ -39,6 +43,7 @@ impl DataFrame {
             metadata,
             label: Some(label),
             source: None,
+            store: None,
         }
     }
 

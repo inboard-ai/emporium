@@ -13,6 +13,9 @@ pub struct Text {
     /// Human-readable description of the invocation (e.g., the SQL query)
     #[serde(default)]
     pub source: Option<String>,
+    /// Per-result cache override — when set, overrides `ToolInfo.cacheable`
+    #[serde(default)]
+    pub store: Option<bool>,
 }
 
 impl Text {
@@ -22,6 +25,7 @@ impl Text {
             content: content.into(),
             label: None,
             source: None,
+            store: None,
         }
     }
 
@@ -31,6 +35,7 @@ impl Text {
             content: content.into(),
             label: Some(label),
             source: None,
+            store: None,
         }
     }
 }
