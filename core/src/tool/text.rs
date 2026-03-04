@@ -16,6 +16,9 @@ pub struct Text {
     /// Per-result cache override — when set, overrides `ToolInfo.cacheable`
     #[serde(default)]
     pub store: Option<bool>,
+    /// Brief description of what the result contains
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 impl Text {
@@ -26,6 +29,7 @@ impl Text {
             label: None,
             source: None,
             store: None,
+            description: None,
         }
     }
 
@@ -36,6 +40,7 @@ impl Text {
             label: Some(label),
             source: None,
             store: None,
+            description: None,
         }
     }
 }

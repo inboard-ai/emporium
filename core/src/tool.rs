@@ -110,6 +110,29 @@ impl ToolResult {
             }
         }
     }
+
+    /// Get the description from the result, if any
+    pub fn description(&self) -> Option<&str> {
+        match self {
+            ToolResult::Text(text) => text.description.as_deref(),
+            ToolResult::DataFrame(df) => df.description.as_deref(),
+        }
+    }
+
+    /// Set a brief description (chainable)
+    pub fn with_description(self, description: impl Into<String>) -> Self {
+        let description = description.into();
+        match self {
+            ToolResult::Text(mut text) => {
+                text.description = Some(description);
+                ToolResult::Text(text)
+            }
+            ToolResult::DataFrame(mut df) => {
+                df.description = Some(description);
+                ToolResult::DataFrame(df)
+            }
+        }
+    }
 }
 
 impl From<Text> for ToolResult {
