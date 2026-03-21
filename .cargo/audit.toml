@@ -1,0 +1,4 @@
+[advisories]
+# rustls-webpki 0.102.8 is pinned by wasmtime-wasi-http 43.0 → tokio-rustls 0.25 → rustls 0.22.4.
+# No fix available without an upstream wasmtime update.
+ignore = ["RUSTSEC-2026-0049"]
