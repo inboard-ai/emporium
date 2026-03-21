@@ -23,6 +23,9 @@ pub struct DataFrame {
     /// Brief description of what the result contains
     #[serde(default)]
     pub description: Option<String>,
+    /// Short, no-spaces identifier for use in formulas (e.g., "combined_ratio")
+    #[serde(default)]
+    pub nickname: Option<String>,
 }
 
 impl DataFrame {
@@ -36,6 +39,7 @@ impl DataFrame {
             source: None,
             store: None,
             description: None,
+            nickname: None,
         }
     }
 
@@ -49,6 +53,7 @@ impl DataFrame {
             source: None,
             store: None,
             description: None,
+            nickname: None,
         }
     }
 

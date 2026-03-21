@@ -133,6 +133,29 @@ impl ToolResult {
             }
         }
     }
+
+    /// Get the nickname from the result, if any
+    pub fn nickname(&self) -> Option<&str> {
+        match self {
+            ToolResult::Text(text) => text.nickname.as_deref(),
+            ToolResult::DataFrame(df) => df.nickname.as_deref(),
+        }
+    }
+
+    /// Set a short, no-spaces identifier for use in formulas (chainable)
+    pub fn with_nickname(self, nickname: impl Into<String>) -> Self {
+        let nickname = nickname.into();
+        match self {
+            ToolResult::Text(mut text) => {
+                text.nickname = Some(nickname);
+                ToolResult::Text(text)
+            }
+            ToolResult::DataFrame(mut df) => {
+                df.nickname = Some(nickname);
+                ToolResult::DataFrame(df)
+            }
+        }
+    }
 }
 
 impl From<Text> for ToolResult {

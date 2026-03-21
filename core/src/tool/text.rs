@@ -19,6 +19,9 @@ pub struct Text {
     /// Brief description of what the result contains
     #[serde(default)]
     pub description: Option<String>,
+    /// Short, no-spaces identifier for use in formulas (e.g., "combined_ratio")
+    #[serde(default)]
+    pub nickname: Option<String>,
 }
 
 impl Text {
@@ -30,6 +33,7 @@ impl Text {
             source: None,
             store: None,
             description: None,
+            nickname: None,
         }
     }
 
@@ -41,6 +45,7 @@ impl Text {
             source: None,
             store: None,
             description: None,
+            nickname: None,
         }
     }
 }
