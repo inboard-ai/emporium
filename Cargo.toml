@@ -32,9 +32,9 @@ thiserror = "1.0.63"
 tokio = { version = "1.39.2", features = ["full"] }
 tokio-stream = { version = "0.1.17", features = ["fs"] }
 toml = "0.9.8"
-wasmtime = "36.0"
-wasmtime-wasi = "36.0"
-wasmtime-wasi-http = "36.0"
+wasmtime = "43.0"
+wasmtime-wasi = "43.0"
+wasmtime-wasi-http = "43.0"
 wit-bindgen = "0.40"
 
 [dev-dependencies]

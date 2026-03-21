@@ -5,6 +5,7 @@ use sipper::{Sipper, sipper};
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::WasiCtxView;
+use wasmtime_wasi_http::p2::WasiHttpCtxView;
 
 use crate::data::{Command, Event, Id};
 
@@ -58,13 +59,13 @@ impl wasmtime_wasi::WasiView for State {
 }
 
 // Implement WasiHttpView for State to enable HTTP support
-impl wasmtime_wasi_http::WasiHttpView for State {
-    fn ctx(&mut self) -> &mut wasmtime_wasi_http::WasiHttpCtx {
-        &mut self.http
-    }
-
-    fn table(&mut self) -> &mut ResourceTable {
-        &mut self.table
+impl wasmtime_wasi_http::p2::WasiHttpView for State {
+    fn http(&mut self) -> WasiHttpCtxView<'_> {
+        WasiHttpCtxView {
+            ctx: &mut self.http,
+            table: &mut self.table,
+            hooks: wasmtime_wasi_http::p2::default_hooks(),
+        }
     }
 }
 
@@ -82,9 +83,7 @@ impl Extension {
         let (msg_tx, mut msg_rx): (Sender, Receiver) = mpsc::unbounded();
 
         sipper(move |mut output| async move {
-            let mut config = wasmtime::Config::new();
-            config.async_support(true);
-            let engine = Engine::new(&config).unwrap();
+            let engine = Engine::default();
             let component = Component::from_binary(&engine, &self.wasm_bytes).unwrap();
 
             // Set up the WASM instance
@@ -95,7 +94,7 @@ impl Extension {
             wasmtime_wasi::p2::add_to_linker_async(&mut linker).unwrap();
 
             // Add WASI HTTP support
-            wasmtime_wasi_http::add_only_http_to_linker_async(&mut linker).unwrap();
+            wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker).unwrap();
 
             // Create WASI context
             let wasi = wasmtime_wasi::WasiCtxBuilder::new().inherit_stdio().build();
