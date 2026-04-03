@@ -129,6 +129,24 @@ fn create_tar_gz(
         );
     }
 
+    // Add required square icon file (icon-square.svg or icon-square.png)
+    let sq_svg_path = extension_path.join("icon-square.svg");
+    let sq_png_path = extension_path.join("icon-square.png");
+    if sq_svg_path.exists() {
+        let icon = fs::read(&sq_svg_path)?;
+        add_bytes_to_archive(&mut archive, &format!("{}/icon-square.svg", package_name), &icon)?;
+        println!("  Added: icon-square.svg");
+    } else if sq_png_path.exists() {
+        let icon = fs::read(&sq_png_path)?;
+        add_bytes_to_archive(&mut archive, &format!("{}/icon-square.png", package_name), &icon)?;
+        println!("  Added: icon-square.png");
+    } else {
+        anyhow::bail!(
+            "Extension must include a square icon file (icon-square.svg or icon-square.png) at {}",
+            extension_path.display()
+        );
+    }
+
     // Add optional README.md
     let readme_path = extension_path.join("README.md");
     if readme_path.exists() {
