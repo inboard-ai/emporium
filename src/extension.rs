@@ -1,153 +1,171 @@
-//! High-level extension API.
+//! High-level typed extension API.
 //!
-//! This module provides a clean abstraction for loading and communicating with extensions.
-//! All WASM/runtime details are hidden from consumers.
+//! A loaded [`Extension`] is `Send + Sync + Clone`: clones share the same
+//! worker thread via a cheap `mpsc` sender clone, and the thread exits when
+//! the last clone drops. All typed methods are `async` and round-trip a
+//! request through the worker.
 
 use std::io::Read;
 use std::path::Path;
+use std::sync::Arc;
 
+use emporium_core::{event, tool};
 use flate2::read::GzDecoder;
-use futures::channel::mpsc;
-use futures::{Stream, StreamExt};
 use tar::Archive;
+use tokio::sync::{broadcast, mpsc, oneshot};
 
-use crate::data::{Command, Event};
 use crate::manifest::{Manifest, RawManifest};
-use crate::{Error, wasm};
+use crate::wasm::{self, Request};
+use crate::{Error, ManifestTool};
 
-/// A loaded extension ready to communicate with.
+/// A loaded extension, ready to receive typed calls.
 ///
-/// All WASM/runtime details are hidden. Use [`Extension::load`] to load from
-/// a `.empkg` package file, or [`Extension::from_bytes`] to load from bytes.
+/// Cloning an `Extension` is cheap: the clone shares the same worker thread
+/// and broadcast subscriber side. The worker thread exits only once the
+/// final clone drops.
+#[derive(Clone)]
 pub struct Extension {
-    manifest: Manifest,
+    manifest: Arc<Manifest>,
     config: serde_json::Value,
-    sender: Option<mpsc::UnboundedSender<Command>>,
-    events: Option<futures::stream::BoxStream<'static, Event>>,
+    metadata: CachedMetadata,
+    requests: mpsc::UnboundedSender<Request>,
+    events: broadcast::Sender<event::Event>,
+}
+
+/// Metadata captured from `extension::get-metadata` during init, kept on the
+/// Extension for cheap synchronous accessors.
+#[derive(Debug, Clone)]
+struct CachedMetadata {
+    id: String,
+    name: String,
+    version: String,
+    description: String,
 }
 
 impl Extension {
-    /// Load an extension from a `.empkg` package file.
-    ///
-    /// The `config` parameter provides settings for the extension (e.g., API keys).
-    /// The schema for required settings is available via [`Extension::manifest`].
+    /// Load an extension from a `.empkg` package file on disk.
     pub async fn load(path: impl AsRef<Path>, config: serde_json::Value) -> Result<Self, Error> {
         let bytes = tokio::fs::read(path.as_ref()).await?;
         Self::from_bytes(&bytes, config).await
     }
 
-    /// Load an extension from package bytes (e.g., downloaded from a store).
+    /// Load an extension from pre-read package bytes.
     pub async fn from_bytes(bytes: &[u8], config: serde_json::Value) -> Result<Self, Error> {
-        // Extract manifest and WASM from the package
         let (manifest, wasm_bytes) = extract_package(bytes)?;
-
-        // Create the WASM extension (internal)
+        let manifest = Arc::new(manifest);
         let config_str = serde_json::to_string(&config)?;
-        let wasm_ext = wasm::Extension::new(manifest.id.clone(), wasm_bytes, config_str);
 
-        // Convert to sipper and set up communication
-        let mut sipper = Box::pin(wasm_ext.into_sipper());
+        let worker = wasm::spawn_worker(manifest.clone(), wasm_bytes, config_str).await?;
 
-        // Wait for the Connected event to get the sender
-        let sender;
-        let mut pending_events = Vec::new();
-
-        loop {
-            match sipper.next().await {
-                Some(Event::Connected(tx)) => {
-                    sender = tx;
-                    break;
-                }
-                Some(event) => {
-                    // Buffer any events before Connected
-                    pending_events.push(event);
-                }
-                None => {
-                    return Err(Error::Custom("Extension closed before connecting".into()));
-                }
-            }
-        }
-
-        // Create event stream that includes any buffered events
-        let events: futures::stream::BoxStream<'static, Event> = if pending_events.is_empty() {
-            sipper.boxed()
-        } else {
-            let buffered = futures::stream::iter(pending_events);
-            buffered.chain(sipper).boxed()
+        let metadata = CachedMetadata {
+            id: worker.metadata.id,
+            name: worker.metadata.name,
+            version: worker.metadata.version,
+            description: worker.metadata.description,
         };
 
         Ok(Extension {
             manifest,
             config,
-            sender: Some(sender),
-            events: Some(events),
+            metadata,
+            requests: worker.requests,
+            events: worker.events,
         })
     }
 
-    /// Get the extension manifest (id, name, version, config schema, etc.).
+    /// Parsed manifest backing this extension.
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
     }
 
-    /// Get the extension ID.
+    /// Extension identifier (`get-metadata().id`).
     pub fn id(&self) -> &str {
-        &self.manifest.id
+        &self.metadata.id
     }
 
-    /// Get the extension version.
+    /// Human-readable extension name.
+    pub fn name(&self) -> &str {
+        &self.metadata.name
+    }
+
+    /// Extension version as reported by the component itself.
     pub fn version(&self) -> &str {
-        &self.manifest.version
+        &self.metadata.version
     }
 
-    /// Get current settings/config.
+    /// Description returned by `get-metadata`.
+    pub fn description(&self) -> &str {
+        &self.metadata.description
+    }
+
+    /// Configuration the extension was initialized with.
     pub fn config(&self) -> &serde_json::Value {
         &self.config
     }
 
-    /// Update settings/config.
-    ///
-    /// Note: This updates the local config state. The extension will receive
-    /// the new config on the next command that uses it.
-    pub fn set_config(&mut self, config: serde_json::Value) {
-        self.config = config;
+    /// Tools advertised in the manifest (build-time cache). Runtime
+    /// [`list_tools`](Self::list_tools) is authoritative.
+    pub fn manifest_tools(&self) -> &[ManifestTool] {
+        &self.manifest.tools
     }
 
-    /// Get a clone of the command sender, if connected.
-    pub fn sender(&self) -> Option<mpsc::UnboundedSender<Command>> {
-        self.sender.clone()
+    /// Ask the extension for its current list of tools.
+    pub async fn list_tools(&self) -> Result<Vec<tool::Info>, Error> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.requests
+            .send(Request::ListTools { reply: reply_tx })
+            .map_err(|_| Error::ExtensionCrashed)?;
+        reply_rx.await.map_err(|_| Error::ExtensionCrashed)?
     }
 
-    /// Send a command to the extension.
-    pub fn send(&self, command: Command) -> Result<(), Error> {
-        let sender = self
-            .sender
-            .as_ref()
-            .ok_or_else(|| Error::Custom("Extension not connected".into()))?;
-
-        sender
-            .unbounded_send(command)
-            .map_err(|e| Error::Custom(format!("Failed to send command: {}", e)))
+    /// Execute a named tool with JSON parameters.
+    pub async fn execute_tool(&self, name: &str, params: serde_json::Value) -> Result<tool::Output, Error> {
+        let params_str = serde_json::to_string(&params)?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.requests
+            .send(Request::ExecuteTool {
+                name: name.to_string(),
+                params: params_str,
+                reply: reply_tx,
+            })
+            .map_err(|_| Error::ExtensionCrashed)?;
+        reply_rx.await.map_err(|_| Error::ExtensionCrashed)?
     }
 
-    /// Get a stream of events from the extension.
-    ///
-    /// This method takes ownership of the event stream. It can only be called once.
-    pub fn events(&mut self) -> Option<impl Stream<Item = Event> + 'static> {
-        self.events.take()
+    /// Render the extension's current view (typically used by the REPL).
+    pub async fn view(&self) -> Result<String, Error> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.requests
+            .send(Request::View { reply: reply_tx })
+            .map_err(|_| Error::ExtensionCrashed)?;
+        reply_rx.await.map_err(|_| Error::ExtensionCrashed)?
+    }
+
+    /// Subscribe to the host-events broadcast stream. Each call yields a
+    /// fresh receiver; slow consumers observe `RecvError::Lagged`.
+    pub fn events(&self) -> broadcast::Receiver<event::Event> {
+        self.events.subscribe()
     }
 }
+
+// Compile-time guarantee: `Extension` must stay `Send + Sync` so host apps
+// can freely share clones across tasks and threads.
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Extension>();
+};
 
 impl std::fmt::Debug for Extension {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Extension")
-            .field("id", &self.manifest.id)
-            .field("name", &self.manifest.name)
-            .field("version", &self.manifest.version)
+            .field("id", &self.metadata.id)
+            .field("name", &self.metadata.name)
+            .field("version", &self.metadata.version)
             .finish()
     }
 }
 
-/// Extract manifest and WASM bytes from a .empkg package.
+/// Extract the manifest and WASM bytes from a gzipped-tar `.empkg` archive.
 fn extract_package(bytes: &[u8]) -> Result<(Manifest, Vec<u8>), Error> {
     let cursor = std::io::Cursor::new(bytes);
     let decoder = GzDecoder::new(cursor);
@@ -158,25 +176,23 @@ fn extract_package(bytes: &[u8]) -> Result<(Manifest, Vec<u8>), Error> {
 
     for entry in archive
         .entries()
-        .map_err(|e| Error::Custom(format!("Invalid package: {}", e)))?
+        .map_err(|e| Error::Custom(format!("Invalid package: {e}")))?
     {
-        let mut entry = entry.map_err(|e| Error::Custom(format!("Invalid package entry: {}", e)))?;
-        let path = entry
-            .path()
-            .map_err(|e| Error::Custom(format!("Invalid path: {}", e)))?;
+        let mut entry = entry.map_err(|e| Error::Custom(format!("Invalid package entry: {e}")))?;
+        let path = entry.path().map_err(|e| Error::Custom(format!("Invalid path: {e}")))?;
         let path_str = path.to_string_lossy();
 
         if path_str.ends_with("manifest.toml") {
             let mut content = String::new();
             entry
                 .read_to_string(&mut content)
-                .map_err(|e| Error::Custom(format!("Failed to read manifest: {}", e)))?;
+                .map_err(|e| Error::Custom(format!("Failed to read manifest: {e}")))?;
             manifest_content = Some(content);
         } else if path_str.ends_with(".wasm") {
             let mut bytes = Vec::new();
             entry
                 .read_to_end(&mut bytes)
-                .map_err(|e| Error::Custom(format!("Failed to read WASM: {}", e)))?;
+                .map_err(|e| Error::Custom(format!("Failed to read WASM: {e}")))?;
             wasm_bytes = Some(bytes);
         }
     }
@@ -184,9 +200,8 @@ fn extract_package(bytes: &[u8]) -> Result<(Manifest, Vec<u8>), Error> {
     let manifest_content = manifest_content.ok_or_else(|| Error::Custom("Package missing manifest.toml".into()))?;
     let wasm_bytes = wasm_bytes.ok_or_else(|| Error::Custom("Package missing WASM file".into()))?;
 
-    // Parse the manifest
     let raw: RawManifest =
-        toml::from_str(&manifest_content).map_err(|e| Error::Custom(format!("Invalid manifest: {}", e)))?;
+        toml::from_str(&manifest_content).map_err(|e| Error::Custom(format!("Invalid manifest: {e}")))?;
     let manifest = raw.into_manifest()?;
 
     Ok((manifest, wasm_bytes))

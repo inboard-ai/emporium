@@ -31,10 +31,22 @@ pub struct Manifest {
     pub tools: Vec<ManifestTool>,
     /// JSON Schema for extension configuration/settings
     pub config_schema: serde_json::Value,
+    /// Declared world the extension was built against, e.g. `"tool-extension"`.
+    /// When absent the host defaults to `"tool-extension"`.
+    #[serde(default)]
+    pub world: Option<String>,
     /// WASM component entry point (internal use)
     #[serde(skip)]
     #[allow(dead_code)]
     pub(crate) component_entry: String,
+}
+
+impl Manifest {
+    /// Returns the declared world name for this extension. Defaults to
+    /// `"tool-extension"` when the manifest does not declare one explicitly.
+    pub fn world(&self) -> &str {
+        self.world.as_deref().unwrap_or("tool-extension")
+    }
 }
 
 /// Raw tool entry from [[tools]] TOML array-of-tables.
@@ -87,7 +99,6 @@ pub(crate) struct ExtensionSection {
 pub(crate) struct ComponentSection {
     pub entry: String,
     #[serde(default)]
-    #[allow(dead_code)]
     pub world: Option<String>,
 }
 
@@ -151,6 +162,7 @@ impl RawManifest {
             capabilities,
             tools,
             config_schema,
+            world: self.component.world,
             component_entry: self.component.entry,
         })
     }
