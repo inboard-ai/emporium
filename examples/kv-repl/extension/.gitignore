@@ -1,0 +1,4 @@
+target/
+# cargo-component auto-regenerates src/bindings.rs on every `cargo component build`.
+# We use wit_bindgen::generate! directly in src/lib.rs, so the file is ignored.
+src/bindings.rs

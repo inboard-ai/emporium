@@ -1,27 +1,32 @@
 //! Key-Value Store Extension
 //!
-//! A simple in-memory key-value store extension for Emporium.
+//! A simple in-memory key-value store extension for Emporium. Exports the
+//! `extension` and `tool-provider` interfaces of the `tool-extension` world.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use emporium_core::{tool::ToolResult, Command, Response, ToolInfo};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 wit_bindgen::generate!({
-    world: "extension-world",
+    world: "tool-extension",
     path: "wit",
 });
 
-use exports::emporium::extensions::extension::{Guest, GuestInstance, Instance, Metadata};
+use exports::emporium::extensions::extension::{Guest as ExtensionGuest, Metadata};
+use exports::emporium::extensions::tool_provider::{Guest as ToolProviderGuest, TextOutput, ToolInfo, ToolOutput};
 
 struct Component;
 
 export!(Component);
 
-impl Guest for Component {
-    type Instance = KvInstance;
+thread_local! {
+    /// Component-level key-value store. WASM is single-threaded per component
+    /// instance, so a `thread_local!` + `RefCell` suffices — no contention.
+    static KV: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+}
 
+impl ExtensionGuest for Component {
     fn get_metadata() -> Metadata {
         Metadata {
             id: "kv".to_string(),
@@ -30,70 +35,29 @@ impl Guest for Component {
             description: "A simple in-memory key-value store".to_string(),
         }
     }
-}
 
-struct KvInstance {
-    store: RefCell<HashMap<String, String>>,
-}
-
-impl GuestInstance for KvInstance {
-    fn new(_config: String) -> Instance {
-        Instance::new(KvInstance {
-            store: RefCell::new(HashMap::new()),
-        })
+    fn init(config: String) -> Result<(), String> {
+        let _ = config;
+        Ok(())
     }
 
-    fn update(&self, command: String) -> Result<String, String> {
-        let cmd: Command = serde_json::from_str(&command).map_err(|e| e.to_string())?;
-
-        let response = match cmd {
-            Command::ListTools { correlation_id } => Response::ToolList {
-                tools: tool_list(),
-                correlation_id,
-            },
-            Command::GetToolDetails {
-                tool_id,
-                correlation_id,
-            } => {
-                if let Some(tool) = tool_list().into_iter().find(|t| t.id == tool_id) {
-                    Response::ToolDetails {
-                        tool_id,
-                        tool_info: tool,
-                        correlation_id,
-                    }
-                } else {
-                    Response::Error {
-                        message: format!("Unknown tool: {}", tool_id),
-                        correlation_id,
-                    }
-                }
-            }
-            Command::ExecuteTool {
-                name,
-                params,
-                correlation_id,
-            } => {
-                let result = self.execute_tool(&name, params);
-                Response::ToolResult {
-                    name,
-                    result,
-                    correlation_id,
-                }
-            }
-            Command::Custom { correlation_id, .. } => Response::Error {
-                message: "Custom commands not supported".to_string(),
-                correlation_id,
-            },
-        };
-
-        serde_json::to_string(&response).map_err(|e| e.to_string())
-    }
-
-    fn view(&self) -> String {
-        serde_json::to_string(&*self.store.borrow()).unwrap_or_default()
+    fn view() -> String {
+        KV.with_borrow(|kv| serde_json::to_string(kv).unwrap_or_default())
     }
 }
 
+impl ToolProviderGuest for Component {
+    fn list_tools() -> Vec<ToolInfo> {
+        tool_list()
+    }
+
+    fn execute_tool(name: String, params: String) -> Result<ToolOutput, String> {
+        let parsed: Value = serde_json::from_str(&params).map_err(|err| format!("invalid params JSON: {err}"))?;
+        execute_tool(&name, &parsed)
+    }
+}
+
+/// Return the static tool manifest advertised by this extension.
 fn tool_list() -> Vec<ToolInfo> {
     vec![
         ToolInfo {
@@ -106,7 +70,10 @@ fn tool_list() -> Vec<ToolInfo> {
                     "key": { "type": "string", "description": "The key to retrieve" }
                 },
                 "required": ["key"]
-            }),
+            })
+            .to_string(),
+            cacheable: false,
+            activity: None,
         },
         ToolInfo {
             id: "set".to_string(),
@@ -119,7 +86,10 @@ fn tool_list() -> Vec<ToolInfo> {
                     "value": { "type": "string", "description": "The value to store" }
                 },
                 "required": ["key", "value"]
-            }),
+            })
+            .to_string(),
+            cacheable: false,
+            activity: None,
         },
         ToolInfo {
             id: "delete".to_string(),
@@ -131,7 +101,10 @@ fn tool_list() -> Vec<ToolInfo> {
                     "key": { "type": "string", "description": "The key to delete" }
                 },
                 "required": ["key"]
-            }),
+            })
+            .to_string(),
+            cacheable: false,
+            activity: None,
         },
         ToolInfo {
             id: "get_all".to_string(),
@@ -140,7 +113,10 @@ fn tool_list() -> Vec<ToolInfo> {
             schema: json!({
                 "type": "object",
                 "properties": {}
-            }),
+            })
+            .to_string(),
+            cacheable: false,
+            activity: None,
         },
         ToolInfo {
             id: "clear".to_string(),
@@ -149,7 +125,10 @@ fn tool_list() -> Vec<ToolInfo> {
             schema: json!({
                 "type": "object",
                 "properties": {}
-            }),
+            })
+            .to_string(),
+            cacheable: false,
+            activity: None,
         },
         ToolInfo {
             id: "stats".to_string(),
@@ -158,78 +137,86 @@ fn tool_list() -> Vec<ToolInfo> {
             schema: json!({
                 "type": "object",
                 "properties": {}
-            }),
+            })
+            .to_string(),
+            cacheable: false,
+            activity: None,
         },
     ]
 }
 
-impl KvInstance {
-    fn execute_tool(&self, name: &str, params: Value) -> Result<ToolResult, emporium_core::CoreError> {
-        match name {
-            "get" => {
-                let key = params
-                    .get("key")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| emporium_core::CoreError::custom("Missing 'key' parameter"))?;
-
-                match self.store.borrow().get(key) {
-                    Some(value) => Ok(ToolResult::text(value)),
-                    None => Ok(ToolResult::text(format!("Key '{}' not found", key))),
-                }
-            }
-            "set" => {
-                let key = params
-                    .get("key")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| emporium_core::CoreError::custom("Missing 'key' parameter"))?;
-                let value = params
-                    .get("value")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| emporium_core::CoreError::custom("Missing 'value' parameter"))?;
-
-                self.store
-                    .borrow_mut()
-                    .insert(key.to_string(), value.to_string());
-                Ok(ToolResult::text(""))
-            }
-            "delete" => {
-                let key = params
-                    .get("key")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| emporium_core::CoreError::custom("Missing 'key' parameter"))?;
-
-                match self.store.borrow_mut().remove(key) {
-                    Some(_) => Ok(ToolResult::text("")),
-                    None => Ok(ToolResult::text(format!("Key '{}' not found", key))),
-                }
-            }
-            "get_all" => {
-                let store = self.store.borrow();
-                if store.is_empty() {
-                    Ok(ToolResult::text("(empty)"))
-                } else {
-                    let entries: Vec<String> =
-                        store.iter().map(|(k, v)| format!("{}: {}", k, v)).collect();
-                    Ok(ToolResult::text(entries.join("\n")))
-                }
-            }
-            "clear" => {
-                self.store.borrow_mut().clear();
-                Ok(ToolResult::text(""))
-            }
-            "stats" => {
-                let count = self.store.borrow().len();
-                let msg = if count == 1 {
-                    "1 entry".to_string()
-                } else {
-                    format!("{} entries", count)
-                };
-                Ok(ToolResult::text(msg))
-            }
-            _ => Err(emporium_core::CoreError::custom(format!(
-                "Unknown tool: {}",
-                name
-            ))),
+/// Dispatch a tool invocation against the thread-local KV store.
+fn execute_tool(name: &str, params: &Value) -> Result<ToolOutput, String> {
+    match name {
+        "get" => {
+            let key = require_str(params, "key")?;
+            let output = KV.with_borrow(|kv| match kv.get(key) {
+                Some(value) => text_output(value.clone()),
+                None => text_output(format!("Key '{key}' not found")),
+            });
+            Ok(output)
         }
+        "set" => {
+            let key = require_str(params, "key")?;
+            let value = require_str(params, "value")?;
+            KV.with_borrow_mut(|kv| kv.insert(key.to_string(), value.to_string()));
+            Ok(text_output(String::new()))
+        }
+        "delete" => {
+            let key = require_str(params, "key")?;
+            let output = KV.with_borrow_mut(|kv| match kv.remove(key) {
+                Some(_) => text_output(String::new()),
+                None => text_output(format!("Key '{key}' not found")),
+            });
+            Ok(output)
+        }
+        "get_all" => {
+            let content = KV.with_borrow(|kv| {
+                if kv.is_empty() {
+                    "(empty)".to_string()
+                } else {
+                    kv.iter()
+                        .map(|(k, v)| format!("{k}: {v}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }
+            });
+            Ok(text_output(content))
+        }
+        "clear" => {
+            KV.with_borrow_mut(|kv| kv.clear());
+            Ok(text_output(String::new()))
+        }
+        "stats" => {
+            let count = KV.with_borrow(|kv| kv.len());
+            let message = if count == 1 {
+                "1 entry".to_string()
+            } else {
+                format!("{count} entries")
+            };
+            Ok(text_output(message))
+        }
+        other => Err(format!("Unknown tool: {other}")),
     }
+}
+
+/// Extract a required string field from a params JSON object, returning an
+/// error string if the field is missing or not a string.
+fn require_str<'a>(params: &'a Value, field: &str) -> Result<&'a str, String> {
+    params
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("Missing '{field}' parameter"))
+}
+
+/// Wrap a string in a `ToolOutput::TextOutput` with no optional metadata set.
+fn text_output(content: String) -> ToolOutput {
+    ToolOutput::TextOutput(TextOutput {
+        content,
+        label: None,
+        source: None,
+        description: None,
+        nickname: None,
+        store: None,
+    })
 }
