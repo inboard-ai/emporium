@@ -1,8 +1,8 @@
 //! Key-Value Store Extension
 //!
 //! A simple in-memory key-value store extension for Emporium. Exports the
-//! `extension`, `tool-provider`, and `block-provider` interfaces of the
-//! `block-extension` world.
+//! `extension`, `tool-provider`, `block-provider`, and `formula-provider`
+//! interfaces of the `rich-extension` world.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -10,13 +10,14 @@ use std::collections::HashMap;
 use serde_json::{Value, json};
 
 wit_bindgen::generate!({
-    world: "block-extension",
+    world: "rich-extension",
     path: "wit",
 });
 
 use emporium::extensions::host_events::{self, Event, Progress};
 use exports::emporium::extensions::block_provider::{BlockTypeInfo, Guest as BlockProviderGuest, PlanOutcome};
 use exports::emporium::extensions::extension::{Guest as ExtensionGuest, Metadata};
+use exports::emporium::extensions::formula_provider::{FormulaDef, Guest as FormulaProviderGuest};
 use exports::emporium::extensions::tool_provider::{
     ColumnDef, DataFrameOutput, Guest as ToolProviderGuest, TextOutput, ToolInfo, ToolOutput,
 };
@@ -127,6 +128,84 @@ impl BlockProviderGuest for Component {
         let _ = parse_state(&state)?;
         Ok(())
     }
+}
+
+impl FormulaProviderGuest for Component {
+    /// Advertise the formulas this extension supports. Each formula declares
+    /// a JSON Schema describing its positional argument array.
+    fn get_formulas() -> Vec<FormulaDef> {
+        vec![
+            FormulaDef {
+                name: "KV_COUNT".to_string(),
+                description: "Number of entries in the KV store.".to_string(),
+                schema: json!({
+                    "type": "array",
+                    "items": [],
+                    "minItems": 0,
+                    "maxItems": 0
+                })
+                .to_string(),
+            },
+            FormulaDef {
+                name: "KV_GET".to_string(),
+                description: "Value for the given key, or null if absent.".to_string(),
+                schema: json!({
+                    "type": "array",
+                    "items": [
+                        { "type": "string", "description": "The key to look up" }
+                    ],
+                    "minItems": 1,
+                    "maxItems": 1
+                })
+                .to_string(),
+            },
+            FormulaDef {
+                name: "KV_EXISTS".to_string(),
+                description: "Whether the given key is present in the KV store.".to_string(),
+                schema: json!({
+                    "type": "array",
+                    "items": [
+                        { "type": "string", "description": "The key to test" }
+                    ],
+                    "minItems": 1,
+                    "maxItems": 1
+                })
+                .to_string(),
+            },
+        ]
+    }
+
+    /// Evaluate a formula against the thread-local KV store. `args` is a JSON
+    /// array of positional arguments; the result is a JSON-encoded value.
+    fn evaluate(name: String, args: String) -> Result<String, String> {
+        let parsed: Value = serde_json::from_str(&args).map_err(|err| format!("invalid args JSON: {err}"))?;
+        let items = parsed
+            .as_array()
+            .ok_or_else(|| "args must be a JSON array".to_string())?;
+        match name.as_str() {
+            "KV_COUNT" => {
+                let count = KV.with_borrow(|kv| kv.len());
+                Ok(json!(count).to_string())
+            }
+            "KV_GET" => {
+                let key = arg_str(items, 0, "KV_GET expects 1 string argument: [key]")?;
+                let value = KV.with_borrow(|kv| kv.get(key).cloned());
+                Ok(json!(value).to_string())
+            }
+            "KV_EXISTS" => {
+                let key = arg_str(items, 0, "KV_EXISTS expects 1 string argument: [key]")?;
+                let exists = KV.with_borrow(|kv| kv.contains_key(key));
+                Ok(json!(exists).to_string())
+            }
+            other => Err(format!("Unknown formula: {other}")),
+        }
+    }
+}
+
+/// Borrow a positional string argument from a parsed JSON args array,
+/// returning `msg` if the slot is missing or not a string.
+fn arg_str<'a>(items: &'a [Value], index: usize, msg: &str) -> Result<&'a str, String> {
+    items.get(index).and_then(Value::as_str).ok_or_else(|| msg.to_string())
 }
 
 /// Push a `host-events::progress` notification announcing that `tool` is running.
