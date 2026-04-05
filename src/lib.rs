@@ -23,6 +23,7 @@ pub mod manifest;
 
 // Internal modules
 mod wasm;
+mod wit_check;
 
 // Re-exports
 pub use data::{Command, Event};

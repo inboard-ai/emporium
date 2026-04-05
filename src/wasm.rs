@@ -1,23 +1,18 @@
-//! WASM extension support
-use futures::StreamExt;
+//! WASM extension support.
+//!
+//! Phase 1 stub: the old string-based WIT bindings have been removed. Phase 2
+//! rewrites this file end-to-end against the new typed provider-based WIT.
+//! Public API surface (`Extension::new`, `Extension::into_sipper`) is preserved
+//! as a stub so `extension.rs` continues to compile during Phase 1.
+
 use futures::channel::mpsc;
 use sipper::{Sipper, sipper};
-use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
-use wasmtime::{Engine, Store};
-use wasmtime_wasi::WasiCtxView;
-use wasmtime_wasi_http::p2::WasiHttpCtxView;
 
 use crate::data::{Command, Event, Id};
 
 /// Public type aliases for easier consumer access
 pub type Sender = futures::channel::mpsc::UnboundedSender<Command>;
 pub type Receiver = futures::channel::mpsc::UnboundedReceiver<Command>;
-
-pub(crate) struct State {
-    table: ResourceTable,
-    wasi: wasmtime_wasi::WasiCtx,
-    http: wasmtime_wasi_http::WasiHttpCtx,
-}
 
 /// Internal WASM extension wrapper.
 /// The public API is in [`crate::extension::Extension`].
@@ -33,166 +28,19 @@ impl Extension {
     pub(crate) fn new(id: Id, wasm_bytes: Vec<u8>, config: String) -> Self {
         Self { id, wasm_bytes, config }
     }
-}
 
-pub(crate) mod bindings {
-    // Generate host-side bindings from WIT
-    wasmtime::component::bindgen!({
-        path: "./wit",
-        world: "extension-world",
-        imports: { default: async },
-        exports: { default: async },
-    });
-}
-
-// Implement the types::Host trait (empty trait required by add_to_linker)
-impl bindings::emporium::extensions::types::Host for State {}
-
-// Implement WasiView for State so WASI can access the context and resource table
-impl wasmtime_wasi::WasiView for State {
-    fn ctx(&mut self) -> WasiCtxView<'_> {
-        WasiCtxView {
-            ctx: &mut self.wasi,
-            table: &mut self.table,
-        }
-    }
-}
-
-// Implement WasiHttpView for State to enable HTTP support
-impl wasmtime_wasi_http::p2::WasiHttpView for State {
-    fn http(&mut self) -> WasiHttpCtxView<'_> {
-        WasiHttpCtxView {
-            ctx: &mut self.http,
-            table: &mut self.table,
-            hooks: wasmtime_wasi_http::p2::default_hooks(),
-        }
-    }
-}
-
-// Implement the log function that extensions can call
-impl bindings::ExtensionWorldImports for State {
-    async fn log(&mut self, level: String, message: String) {
-        eprintln!("[{}] {}", level, message);
-    }
-}
-
-impl Extension {
     /// Convert the extension into a sipper that emits responses.
-    /// The sipper will first emit a Connected response with a message sender.
+    ///
+    /// Phase 1 stub: immediately emits a `Connected` event with a discarded
+    /// sender and exits. Phase 2 replaces this with a typed worker loop.
     pub(crate) fn into_sipper(self) -> impl Sipper<(), Event> {
-        let (msg_tx, mut msg_rx): (Sender, Receiver) = mpsc::unbounded();
-
+        let _ = self.wasm_bytes;
+        let _ = self.config;
+        let id = self.id;
         sipper(move |mut output| async move {
-            let engine = Engine::default();
-            let component = Component::from_binary(&engine, &self.wasm_bytes).unwrap();
-
-            // Set up the WASM instance
-            let mut linker = Linker::new(&engine);
-            bindings::ExtensionWorld::add_to_linker::<_, HasSelf<_>>(&mut linker, |state: &mut State| state).unwrap();
-
-            // Add WASI support
-            wasmtime_wasi::p2::add_to_linker_async(&mut linker).unwrap();
-
-            // Add WASI HTTP support
-            wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker).unwrap();
-
-            // Create WASI context
-            let wasi = wasmtime_wasi::WasiCtxBuilder::new().inherit_stdio().build();
-
-            let mut store = Store::new(&engine, State {
-                table: ResourceTable::new(),
-                wasi,
-                http: wasmtime_wasi_http::WasiHttpCtx::new(),
-            });
-
-            let bindings = bindings::ExtensionWorld::instantiate_async(&mut store, &component, &linker)
-                .await
-                .unwrap();
-
-            // Get metadata
-            let metadata = bindings
-                .emporium_extensions_extension()
-                .call_get_metadata(&mut store)
-                .await
-                .unwrap();
-
-            output
-                .send(Event::Core(emporium_core::Response::Metadata {
-                    id: metadata.id,
-                    name: metadata.name,
-                    version: metadata.version,
-                    description: metadata.description,
-                }))
-                .await;
-
-            // Create an extension instance
-            let instance = bindings.emporium_extensions_extension().instance();
-
-            // Create instance resource with config
-            let instance_resource = instance.call_new(&mut store, &self.config).await.unwrap();
-
-            // Send the Connected response with the message sender
-            output.send(Event::Connected(msg_tx.clone())).await;
-
-            // Process messages
-            while let Some(cmd) = msg_rx.next().await {
-                // Extract correlation_id for error handling
-                let correlation_id = cmd.correlation_id().cloned();
-
-                // Serialize the command to JSON
-                let cmd_json = match serde_json::to_string(&cmd) {
-                    Ok(json) => json,
-                    Err(e) => {
-                        output
-                            .send(Event::Core(emporium_core::Response::Error {
-                                message: format!("Failed to serialize command: {}", e),
-                                correlation_id,
-                            }))
-                            .await;
-                        continue;
-                    }
-                };
-
-                // Pass the JSON string to the extension
-                match instance.call_update(&mut store, instance_resource, &cmd_json).await {
-                    Ok(Ok(response_json)) => {
-                        // Try to deserialize the response as core Response enum
-                        match serde_json::from_str::<emporium_core::Response>(&response_json) {
-                            Ok(core_response) => {
-                                output.send(Event::Core(core_response)).await;
-                            }
-                            Err(e) => {
-                                output
-                                    .send(Event::Core(emporium_core::Response::Error {
-                                        message: format!("Failed to deserialize response: {}", e),
-                                        correlation_id,
-                                    }))
-                                    .await;
-                            }
-                        }
-                    }
-                    Ok(Err(error)) => {
-                        // Extension returned an error
-                        output
-                            .send(Event::Core(emporium_core::Response::Error {
-                                message: error,
-                                correlation_id,
-                            }))
-                            .await;
-                    }
-                    Err(e) => {
-                        // WASM runtime error
-                        output
-                            .send(Event::Core(emporium_core::Response::Error {
-                                message: format!("Runtime error: {}", e),
-                                correlation_id,
-                            }))
-                            .await;
-                    }
-                }
-            }
-
-            eprintln!("Extension {} message loop ended", self.id);
+            let (tx, _rx): (Sender, Receiver) = mpsc::unbounded();
+            output.send(Event::Connected(tx)).await;
+            eprintln!("Extension {} stub sipper exiting (Phase 1)", id);
         })
     }
 }
