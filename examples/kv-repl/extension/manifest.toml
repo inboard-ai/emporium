@@ -10,7 +10,7 @@ categories = ["storage"]
 
 [component]
 entry = "target/wasm32-wasip1/release/kv_extension.wasm"
-world = "rich-extension"
+world = "full-extension"
 
 [config]
 schema = '{}'

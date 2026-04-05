@@ -2,18 +2,20 @@
 //!
 //! A simple in-memory key-value store extension for Emporium. Exports the
 //! `extension`, `tool-provider`, `block-provider`, and `formula-provider`
-//! interfaces of the `rich-extension` world.
+//! interfaces of the `full-extension` world, and imports `host-data` for
+//! cursor-based streaming access to host-managed resources.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde_json::{Value, json};
 
 wit_bindgen::generate!({
-    world: "rich-extension",
+    world: "full-extension",
     path: "wit",
 });
 
+use emporium::extensions::host_data::Cursor;
 use emporium::extensions::host_events::{self, Event, Progress};
 use exports::emporium::extensions::block_provider::{BlockTypeInfo, Guest as BlockProviderGuest, PlanOutcome};
 use exports::emporium::extensions::extension::{Guest as ExtensionGuest, Metadata};
@@ -116,6 +118,19 @@ impl BlockProviderGuest for Component {
                     }
                     None => Err(format!("prefix not found: {old}")),
                 }
+            }
+            "analyze" => {
+                let freq_json = analyze_keys()?;
+                Ok(PlanOutcome::Computed(freq_json))
+            }
+            "add_and_analyze" => {
+                let prefix = require_str(&input_value, "prefix")?.to_string();
+                if !prefixes.contains(&prefix) {
+                    prefixes.push(prefix);
+                }
+                let new_state = serialize_state(&prefixes)?;
+                let freq_json = analyze_keys()?;
+                Ok(PlanOutcome::StateUpdateWithComputed((new_state, freq_json)))
             }
             other => Err(format!("Unknown operation: {other}")),
         }
@@ -490,4 +505,36 @@ fn build_query_plan(prefixes: &[String]) -> Result<String, String> {
         "filter": { "key_starts_with_any": prefixes },
     }))
     .map_err(|err| err.to_string())
+}
+
+/// Stream the `kv-keys` host resource via a cursor, tallying UTF-8 character
+/// frequencies across every row's `key` field. Returns a JSON object mapping
+/// each character (as a one-char string) to its total count, sorted by char.
+fn analyze_keys() -> Result<String, String> {
+    // Query arg is opaque for Phase 5 — the host decides what to do with it.
+    let cursor = Cursor::open("kv-keys", "").map_err(|err| format!("open cursor: {err}"))?;
+
+    let mut freqs: BTreeMap<char, u32> = BTreeMap::new();
+    loop {
+        match cursor.next_batch(64) {
+            Ok(Some(batch_json)) => {
+                let rows: Vec<Value> =
+                    serde_json::from_str(&batch_json).map_err(|err| format!("parse batch: {err}"))?;
+                for row in rows {
+                    if let Some(key) = row.get("key").and_then(Value::as_str) {
+                        for ch in key.chars() {
+                            *freqs.entry(ch).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(err) => return Err(format!("next batch: {err}")),
+        }
+    }
+
+    // Serde serializes char map keys as one-char strings, giving us
+    // `{"a": 3, "b": 1, ...}`. BTreeMap ordering makes the output
+    // deterministic across runs.
+    serde_json::to_string(&freqs).map_err(|err| format!("serialize freqs: {err}"))
 }
