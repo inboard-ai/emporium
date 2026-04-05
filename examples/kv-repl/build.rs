@@ -12,6 +12,8 @@ fn main() {
     println!("cargo::rerun-if-changed=extension/src/lib.rs");
     println!("cargo::rerun-if-changed=extension/Cargo.toml");
     println!("cargo::rerun-if-changed=extension/manifest.toml");
+    println!("cargo::rerun-if-changed=extension/icon.svg");
+    println!("cargo::rerun-if-changed=extension/icon-square.svg");
 
     // Build the extension with cargo-component
     let status = Command::new("cargo")

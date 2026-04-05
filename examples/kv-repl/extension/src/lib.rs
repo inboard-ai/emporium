@@ -13,6 +13,7 @@ wit_bindgen::generate!({
     path: "wit",
 });
 
+use emporium::extensions::host_events::{self, Event, Progress};
 use exports::emporium::extensions::extension::{Guest as ExtensionGuest, Metadata};
 use exports::emporium::extensions::tool_provider::{Guest as ToolProviderGuest, TextOutput, ToolInfo, ToolOutput};
 
@@ -52,9 +53,19 @@ impl ToolProviderGuest for Component {
     }
 
     fn execute_tool(name: String, params: String) -> Result<ToolOutput, String> {
+        // Emit a progress event so the host can surface activity in UI/logs.
+        notify_progress(&name);
         let parsed: Value = serde_json::from_str(&params).map_err(|err| format!("invalid params JSON: {err}"))?;
         execute_tool(&name, &parsed)
     }
+}
+
+/// Push a `host-events::progress` notification announcing that `tool` is running.
+fn notify_progress(tool: &str) {
+    host_events::notify(&Event::Progress(Progress {
+        percent: None,
+        message: format!("Running {tool}"),
+    }));
 }
 
 /// Return the static tool manifest advertised by this extension.
