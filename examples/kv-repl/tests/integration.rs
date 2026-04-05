@@ -7,7 +7,8 @@
 use std::time::Duration;
 
 use emporium::Extension;
-use emporium_core::{event, plan, tool};
+use emporium::host_data::DataRegistry;
+use emporium_core::{column, event, plan, tool};
 use serde_json::json;
 
 /// Path to the packaged kv-extension, baked in by kv-repl's build.rs.
@@ -324,4 +325,119 @@ async fn formula_kv_exists_returns_boolean() {
         .expect("evaluate KV_EXISTS missing");
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("parse KV_EXISTS result");
     assert_eq!(parsed, json!(false));
+}
+
+fn kv_keys_schema() -> Vec<column::Def> {
+    vec![column::Def {
+        name: "key".to_string(),
+        alias: "Key".to_string(),
+        dtype: "string".to_string(),
+    }]
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn host_data_cursor_analyze_returns_computed_frequencies() {
+    let registry = DataRegistry::new();
+    registry.register("kv-keys", kv_keys_schema(), vec![
+        json!({"key": "abc"}),
+        json!({"key": "ab"}),
+        json!({"key": "c"}),
+    ]);
+
+    let bytes = std::fs::read(KV_EXTENSION_PATH).expect("read kv extension bytes");
+    let ext = Extension::from_bytes_with_data(&bytes, json!({}), registry)
+        .await
+        .expect("load extension with host data");
+
+    let provider = ext.block().expect("block provider should be available");
+    let state = provider
+        .create("prefix-tracker", json!({"prefixes": ["a"]}))
+        .await
+        .expect("create prefix-tracker block");
+
+    let outcome = provider
+        .plan("prefix-tracker", &state, "analyze", json!({}))
+        .await
+        .expect("plan analyze");
+    let freq_json = match outcome {
+        plan::Outcome::Computed(freq_json) => freq_json,
+        other => panic!("expected Computed, got {other:?}"),
+    };
+
+    let freqs: serde_json::Value = serde_json::from_str(&freq_json).expect("parse freq JSON");
+    let map = freqs.as_object().expect("freq JSON is object");
+    // "abc" + "ab" + "c" → a=2, b=2, c=2.
+    assert_eq!(map.get("a").and_then(|v| v.as_u64()), Some(2));
+    assert_eq!(map.get("b").and_then(|v| v.as_u64()), Some(2));
+    assert_eq!(map.get("c").and_then(|v| v.as_u64()), Some(2));
+    assert_eq!(map.len(), 3, "expected exactly 3 distinct chars, got {map:?}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn host_data_cursor_add_and_analyze_returns_state_update_with_computed() {
+    let registry = DataRegistry::new();
+    registry.register("kv-keys", kv_keys_schema(), vec![json!({"key": "hello"})]);
+
+    let bytes = std::fs::read(KV_EXTENSION_PATH).expect("read kv extension bytes");
+    let ext = Extension::from_bytes_with_data(&bytes, json!({}), registry)
+        .await
+        .expect("load extension with host data");
+
+    let provider = ext.block().expect("block provider should be available");
+    let state = provider
+        .create("prefix-tracker", json!({"prefixes": ["h"]}))
+        .await
+        .expect("create prefix-tracker block");
+
+    let outcome = provider
+        .plan("prefix-tracker", &state, "add_and_analyze", json!({"prefix": "w"}))
+        .await
+        .expect("plan add_and_analyze");
+    let (new_state, freq_json) = match outcome {
+        plan::Outcome::StateUpdateWithComputed(new_state, freq_json) => (new_state, freq_json),
+        other => panic!("expected StateUpdateWithComputed, got {other:?}"),
+    };
+
+    let parsed_state: serde_json::Value = serde_json::from_str(&new_state).expect("parse new state");
+    let prefixes = parsed_state
+        .get("prefixes")
+        .and_then(|v| v.as_array())
+        .expect("prefixes array");
+    let prefix_strs: Vec<&str> = prefixes.iter().filter_map(|v| v.as_str()).collect();
+    assert_eq!(prefix_strs, vec!["h", "w"]);
+
+    let freqs: serde_json::Value = serde_json::from_str(&freq_json).expect("parse freq JSON");
+    let map = freqs.as_object().expect("freq JSON is object");
+    assert_eq!(map.get("h").and_then(|v| v.as_u64()), Some(1));
+    assert_eq!(map.get("e").and_then(|v| v.as_u64()), Some(1));
+    assert_eq!(map.get("l").and_then(|v| v.as_u64()), Some(2));
+    assert_eq!(map.get("o").and_then(|v| v.as_u64()), Some(1));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn host_data_cursor_empty_resource_yields_empty_frequencies() {
+    let registry = DataRegistry::new();
+    registry.register("kv-keys", kv_keys_schema(), Vec::new());
+
+    let bytes = std::fs::read(KV_EXTENSION_PATH).expect("read kv extension bytes");
+    let ext = Extension::from_bytes_with_data(&bytes, json!({}), registry)
+        .await
+        .expect("load extension with host data");
+
+    let provider = ext.block().expect("block provider should be available");
+    let state = provider
+        .create("prefix-tracker", json!({"prefixes": ["x"]}))
+        .await
+        .expect("create prefix-tracker block");
+
+    let outcome = provider
+        .plan("prefix-tracker", &state, "analyze", json!({}))
+        .await
+        .expect("plan analyze on empty resource");
+    let freq_json = match outcome {
+        plan::Outcome::Computed(freq_json) => freq_json,
+        other => panic!("expected Computed, got {other:?}"),
+    };
+
+    assert_eq!(freq_json, "{}", "empty resource should produce empty frequency map");
 }

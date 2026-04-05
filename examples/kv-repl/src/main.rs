@@ -20,16 +20,27 @@
 //!   block-add <prefix>            - Add a prefix to the current block state
 //!   block-rename <old> <new>      - Rename a prefix and re-query matching keys
 //!   block-query                   - Run the current block's query plan
+//!   sync-keys                     - Mirror KV keys into the host-data `kv-keys` resource
+//!   analyze                       - Run prefix-tracker compute over kv-keys
+//!   add-analyze <prefix>          - Add prefix and re-analyze in one step
 //!   formulas                      - List formulas advertised by the extension
 //!   formula <name> [args...]      - Evaluate a formula with positional args
 //!   help                          - Print this help message
 //!   quit                          - Exit the REPL
+//!
+//! Typical compute workflow:
+//!   1. `set foo bar` / `set baz qux` to populate the KV store
+//!   2. `sync-keys` to mirror the keys into the host-data `kv-keys` resource
+//!   3. `block-create a b` to create a prefix-tracker block
+//!   4. `analyze` to run a character-frequency analysis via a host cursor
+//!   5. `add-analyze xyz` to extend the block's prefix list and re-analyze
 
 use std::io::{self, BufRead, Write};
 use std::time::Duration;
 
+use emporium::host_data::DataRegistry;
 use emporium::{Extension, block, formula};
-use emporium_core::{plan, tool};
+use emporium_core::{column, plan, tool};
 use serde_json::json;
 use tokio::sync::broadcast::error::RecvError;
 
@@ -52,14 +63,21 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Loading extension from: {path}");
 
-    let ext = Extension::load(&path, json!({})).await?;
+    // Shared host-data registry. The same Arc-backed handle is handed to the
+    // extension worker and retained here in the REPL, so `sync-keys` writes
+    // become visible to the extension's cursor reads.
+    let registry = DataRegistry::new();
+    registry.register(KV_KEYS_RESOURCE, kv_keys_schema(), Vec::new());
+
+    let ext = Extension::load_with_data(&path, json!({}), registry.clone()).await?;
 
     println!("Loaded: {} v{}", ext.id(), ext.version());
     println!("{}\n", ext.description());
     println!(
         "Commands: get <key>, set <key> <value>, delete <key>, list, clear, stats, tools, view,\n\
          block-types, block-create <prefix>..., block-add <prefix>, block-rename <old> <new>,\n\
-         block-query, formulas, formula <name> [args...], help, quit\n"
+         block-query, sync-keys, analyze, add-analyze <prefix>,\n\
+         formulas, formula <name> [args...], help, quit\n"
     );
 
     // Bind the block provider once. The kv-extension advertises the
@@ -170,6 +188,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 block_rename(&ext, &block_provider, parts[1], new, &mut block_state).await;
             }
             "block-query" => block_query(&ext, &block_provider, &block_state).await,
+            "sync-keys" => sync_keys(&ext, &registry).await,
+            "analyze" => block_analyze(&block_provider, &block_state).await,
+            "add-analyze" => {
+                if parts.len() < 2 {
+                    println!("Usage: add-analyze <prefix>");
+                    continue;
+                }
+                let prefix = parts[1].split_whitespace().next().unwrap_or("");
+                if prefix.is_empty() {
+                    println!("Usage: add-analyze <prefix>");
+                    continue;
+                }
+                block_add_analyze(&block_provider, prefix, &mut block_state).await;
+            }
             "formulas" => list_formulas(&formula_provider).await,
             "formula" => {
                 // Collect the formula name plus any positional arguments, all
@@ -197,6 +229,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  block-add <prefix>            - Add a prefix to the current block state");
                 println!("  block-rename <old> <new>      - Rename a prefix and re-query matching keys");
                 println!("  block-query                   - Run the current block's query plan");
+                println!("  sync-keys                     - Mirror KV keys into the kv-keys host-data resource");
+                println!("  analyze                       - Run prefix-tracker compute over kv-keys");
+                println!("  add-analyze <prefix>          - Add prefix and re-analyze in one step");
                 println!("  formulas                      - List formulas advertised by the extension");
                 println!("  formula <name> [args...]      - Evaluate a formula with positional args");
                 println!("  quit                          - Exit the REPL");
@@ -480,5 +515,131 @@ async fn evaluate_formula(provider: &formula::Provider, name: &str, args: &[Stri
     match provider.evaluate(name, args_value).await {
         Ok(result) => println!("{result}"),
         Err(err) => println!("Error evaluating formula: {err}"),
+    }
+}
+
+/// Stable identifier for the host-data resource the prefix-tracker block
+/// analyzes via a cursor.
+const KV_KEYS_RESOURCE: &str = "kv-keys";
+
+/// Schema of the `kv-keys` host-data resource: one row per key, with a single
+/// `key` column. Matches what the kv-extension's `analyze_keys` expects.
+fn kv_keys_schema() -> Vec<column::Def> {
+    vec![column::Def {
+        name: "key".to_string(),
+        alias: "Key".to_string(),
+        dtype: "string".to_string(),
+    }]
+}
+
+/// Mirror the KV store's current keys into the shared host-data `kv-keys`
+/// resource. Calls `list_keys`, pulls the `DataFrame` rows, and re-registers
+/// them under the same id so the extension's cursor sees the updated data.
+async fn sync_keys(ext: &Extension, registry: &DataRegistry) {
+    let output = match ext.execute_tool("list_keys", json!({})).await {
+        Ok(output) => output,
+        Err(err) => {
+            println!("Error running list_keys: {err}");
+            return;
+        }
+    };
+
+    let df = match output {
+        tool::Output::DataFrame(df) => df,
+        other => {
+            let _ = other;
+            println!("Unexpected list_keys output variant (expected DataFrame)");
+            return;
+        }
+    };
+
+    let rows: Vec<serde_json::Value> = match df.data.as_array() {
+        Some(rows) => rows.clone(),
+        None => {
+            println!("Unexpected list_keys data shape (expected JSON array)");
+            return;
+        }
+    };
+
+    let count = rows.len();
+    registry.register(KV_KEYS_RESOURCE, kv_keys_schema(), rows);
+    println!("Synced {count} keys to kv-keys resource");
+}
+
+/// Run the `analyze` block operation and print the resulting character
+/// frequency map. Expects `Outcome::Computed(freq_json)`.
+async fn block_analyze(provider: &block::Provider, block_state: &Option<String>) {
+    let Some(state) = block_state.as_deref() else {
+        println!("{BLOCK_MISSING_HINT}");
+        return;
+    };
+    match provider.plan(PREFIX_TRACKER_KIND, state, "analyze", json!({})).await {
+        Ok(plan::Outcome::Computed(freq_json)) => print_frequencies(&freq_json),
+        Ok(other) => {
+            let _ = other;
+            println!("Warning: expected Computed from analyze, got a different outcome.");
+        }
+        Err(err) => println!("Error running analyze: {err}"),
+    }
+}
+
+/// Run the `add_and_analyze` block operation, update local state, and print
+/// the resulting character frequency map. Expects
+/// `Outcome::StateUpdateWithComputed(new_state, freq_json)`.
+async fn block_add_analyze(provider: &block::Provider, prefix: &str, block_state: &mut Option<String>) {
+    let Some(state) = block_state.as_deref() else {
+        println!("{BLOCK_MISSING_HINT}");
+        return;
+    };
+    let input = json!({ "prefix": prefix });
+    match provider
+        .plan(PREFIX_TRACKER_KIND, state, "add_and_analyze", input)
+        .await
+    {
+        Ok(plan::Outcome::StateUpdateWithComputed(new_state, freq_json)) => {
+            print_frequencies(&freq_json);
+            println!("Updated state: {new_state}");
+            *block_state = Some(new_state);
+        }
+        Ok(other) => {
+            let _ = other;
+            println!("Warning: expected StateUpdateWithComputed from add_and_analyze, got a different outcome.");
+        }
+        Err(err) => println!("Error running add_and_analyze: {err}"),
+    }
+}
+
+/// Parse a `BTreeMap<char, u32>`-shaped JSON object and print its entries
+/// in sorted order, one per line as `  'c': N`.
+fn print_frequencies(freq_json: &str) {
+    let value: serde_json::Value = match serde_json::from_str(freq_json) {
+        Ok(value) => value,
+        Err(err) => {
+            println!("Error parsing frequencies JSON: {err}");
+            return;
+        }
+    };
+    let map = match value.as_object() {
+        Some(map) => map,
+        None => {
+            println!("Unexpected frequencies shape (expected JSON object): {freq_json}");
+            return;
+        }
+    };
+
+    println!("Character frequencies:");
+    if map.is_empty() {
+        println!("  (none)");
+        return;
+    }
+    // BTreeMap serialization is already sorted by key, but re-sort to be
+    // defensive in case the JSON object order ever drifts.
+    let mut entries: Vec<(&String, &serde_json::Value)> = map.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    for (ch, count) in entries {
+        match count.as_u64() {
+            Some(n) => println!("  '{ch}': {n}"),
+            None => println!("  '{ch}': (non-numeric count: {count})"),
+        }
     }
 }
