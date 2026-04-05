@@ -61,7 +61,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Use command line arg if provided, otherwise use the built-in extension.
     let path = std::env::args().nth(1).unwrap_or_else(|| KV_EXTENSION_PATH.to_string());
 
+    // Opt-in verbose event logging via `EMPORIUM_REPL_VERBOSE=1`. Default is
+    // silent so per-tool-call progress events don't clutter the REPL.
+    let verbose = std::env::var("EMPORIUM_REPL_VERBOSE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
     println!("Loading extension from: {path}");
+    if verbose {
+        println!("(verbose event logging enabled)\n");
+    }
 
     // Shared host-data registry. The same Arc-backed handle is handed to the
     // extension worker and retained here in the REPL, so `sync-keys` writes
@@ -88,10 +97,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // `rich-extension` world, so this should always be `Some` at startup.
     let formula_provider = ext.formula().ok_or("extension does not export a formula provider")?;
 
-    // Drain the host-events broadcast stream in the background so users can
-    // see progress events emitted by the extension.
+    // Drain the host-events broadcast stream in the background. The channel is
+    // always drained (so subscribers don't lag), but events are only printed
+    // when `EMPORIUM_REPL_VERBOSE=1`.
     let events = ext.events();
-    tokio::spawn(drain_events(events));
+    tokio::spawn(drain_events(events, verbose));
 
     // Block-provider state tracked across block-* commands. `None` until the
     // user runs `block-create`.
@@ -277,17 +287,26 @@ fn print_output(output: tool::Output) {
     }
 }
 
-/// Background task that prints host-events as they arrive. Treats
-/// `RecvError::Lagged` as a re-sync opportunity and keeps going.
-async fn drain_events(mut events: tokio::sync::broadcast::Receiver<emporium_core::event::Event>) {
+/// Background task that drains `host-events` broadcasts.
+///
+/// Events are dropped on the floor unless `verbose` is set — the REPL's
+/// `notify_progress` emission fires per tool call, which is noisy for
+/// interactive use. A proper `host-logs` WIT interface (level/target/fields,
+/// routed through the host's tracing subscriber) is future work. For now
+/// this lets users opt in via `EMPORIUM_REPL_VERBOSE=1`.
+async fn drain_events(mut events: tokio::sync::broadcast::Receiver<emporium_core::event::Event>, verbose: bool) {
     loop {
         match events.recv().await {
             Ok(event) => {
-                let description = describe_event(&event);
-                println!("[event] {description}");
+                if verbose {
+                    let description = describe_event(&event);
+                    println!("[event] {description}");
+                }
             }
             Err(RecvError::Lagged(n)) => {
-                println!("[event] (lagged; dropped {n} events)");
+                if verbose {
+                    println!("[event] (lagged; dropped {n} events)");
+                }
             }
             Err(RecvError::Closed) => return,
         }

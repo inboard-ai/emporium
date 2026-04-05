@@ -314,3 +314,102 @@ impl DataFrame {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn two_col_schema() -> Vec<column::Def> {
+        vec![
+            column::Def {
+                name: "a".to_string(),
+                alias: "A".to_string(),
+                dtype: "integer".to_string(),
+            },
+            column::Def {
+                name: "b".to_string(),
+                alias: "B".to_string(),
+                dtype: "string".to_string(),
+            },
+        ]
+    }
+
+    #[test]
+    fn data_frame_new_populates_schema_data_metadata() {
+        let schema = two_col_schema();
+        let data = json!([{"a": 1, "b": "x"}]);
+        let metadata = Some(json!({"src": "test"}));
+        let df = DataFrame::new(schema.clone(), data.clone(), metadata.clone());
+        assert_eq!(df.schema.len(), 2);
+        assert_eq!(df.data, data);
+        assert_eq!(df.metadata, metadata);
+        assert!(df.label.is_none());
+        assert!(df.source.is_none());
+        assert!(df.store.is_none());
+        assert!(df.description.is_none());
+        assert!(df.nickname.is_none());
+    }
+
+    #[test]
+    fn data_frame_with_label_populates_schema_data_label() {
+        let schema = two_col_schema();
+        let data = json!([]);
+        let df = DataFrame::with_label(schema, data, None, Label::new("L"));
+        assert_eq!(df.label.as_ref().map(|l| l.0.as_str()), Some("L"));
+    }
+
+    #[test]
+    fn to_dataframe_from_row_oriented_array() {
+        let schema = two_col_schema();
+        let data = json!([
+            {"a": 1, "b": "x"},
+            {"a": 2, "b": "y"},
+        ]);
+        let df = DataFrame::new(schema, data, None);
+        let polars_df = df.to_dataframe().unwrap();
+        assert_eq!(polars_df.height(), 2);
+        assert_eq!(polars_df.width(), 2);
+    }
+
+    #[test]
+    fn to_dataframe_from_empty_array_returns_empty_frame() {
+        let schema = two_col_schema();
+        let df = DataFrame::new(schema, json!([]), None);
+        let polars_df = df.to_dataframe().unwrap();
+        assert_eq!(polars_df.height(), 0);
+    }
+
+    #[test]
+    fn to_dataframe_from_null_data_returns_empty_frame() {
+        let schema = two_col_schema();
+        let df = DataFrame::new(schema, serde_json::Value::Null, None);
+        let polars_df = df.to_dataframe().unwrap();
+        assert_eq!(polars_df.height(), 0);
+    }
+
+    #[test]
+    fn to_dataframe_from_invalid_data_returns_error() {
+        let schema = two_col_schema();
+        let df = DataFrame::new(schema.clone(), json!("just a string"), None);
+        let err = df.to_dataframe().unwrap_err();
+        assert!(matches!(err, Error::DataFrame(_)));
+
+        let df = DataFrame::new(schema, json!(42), None);
+        let err = df.to_dataframe().unwrap_err();
+        assert!(matches!(err, Error::DataFrame(_)));
+    }
+
+    #[test]
+    fn to_dataframe_column_oriented_object_format() {
+        let schema = two_col_schema();
+        let data = json!({
+            "a": [1, 2, 3],
+            "b": ["x", "y", "z"],
+        });
+        let df = DataFrame::new(schema, data, None);
+        let polars_df = df.to_dataframe().unwrap();
+        assert_eq!(polars_df.height(), 3);
+        assert_eq!(polars_df.width(), 2);
+    }
+}

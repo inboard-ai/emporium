@@ -58,3 +58,93 @@ impl<T: Into<String>> From<T> for Label {
         Self(value.into())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn info_serde_roundtrip_preserves_all_fields() {
+        let original = Info {
+            id: "tool-1".to_string(),
+            name: "Tool One".to_string(),
+            description: "does a thing".to_string(),
+            schema: json!({"type": "object"}),
+            cacheable: true,
+            activity: Some(Activity {
+                present: "Querying".to_string(),
+                past: "Queried".to_string(),
+                subject_field: "/query".to_string(),
+            }),
+        };
+        let encoded = serde_json::to_string(&original).unwrap();
+        let decoded: Info = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.id, original.id);
+        assert_eq!(decoded.name, original.name);
+        assert_eq!(decoded.description, original.description);
+        assert_eq!(decoded.schema, original.schema);
+        assert_eq!(decoded.cacheable, original.cacheable);
+        let activity = decoded.activity.unwrap();
+        assert_eq!(activity.present, "Querying");
+        assert_eq!(activity.past, "Queried");
+        assert_eq!(activity.subject_field, "/query");
+    }
+
+    #[test]
+    fn info_with_missing_cacheable_defaults_to_false() {
+        let raw = json!({
+            "id": "t",
+            "name": "T",
+            "description": "",
+            "schema": {},
+        });
+        let decoded: Info = serde_json::from_value(raw).unwrap();
+        assert!(!decoded.cacheable);
+        assert!(decoded.activity.is_none());
+    }
+
+    #[test]
+    fn info_omits_none_activity_on_serialize() {
+        let info = Info {
+            id: "t".to_string(),
+            name: "T".to_string(),
+            description: "".to_string(),
+            schema: json!({}),
+            cacheable: false,
+            activity: None,
+        };
+        let encoded = serde_json::to_value(&info).unwrap();
+        assert!(encoded.get("activity").is_none());
+    }
+
+    #[test]
+    fn activity_serde_roundtrip() {
+        let original = Activity {
+            present: "Running".to_string(),
+            past: "Ran".to_string(),
+            subject_field: "/x".to_string(),
+        };
+        let encoded = serde_json::to_string(&original).unwrap();
+        let decoded: Activity = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.present, original.present);
+        assert_eq!(decoded.past, original.past);
+        assert_eq!(decoded.subject_field, original.subject_field);
+    }
+
+    #[test]
+    fn label_from_str_and_string_equivalent() {
+        let from_str: Label = "AAPL".into();
+        let from_string: Label = String::from("AAPL").into();
+        assert_eq!(from_str.0, "AAPL");
+        assert_eq!(from_string.0, "AAPL");
+    }
+
+    #[test]
+    fn label_new_wraps_input() {
+        let label = Label::new("MSFT");
+        assert_eq!(label.0, "MSFT");
+        let label = Label::new(String::from("GOOG"));
+        assert_eq!(label.0, "GOOG");
+    }
+}
