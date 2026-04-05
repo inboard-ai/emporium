@@ -3,6 +3,21 @@
 package emporium:extensions@0.2.0;
 
 // ----------------------------------------------------------------------------
+// Shared types (referenced by multiple interfaces — both exports and imports).
+// Lifted out to its own interface so `host-data` (an import) can reference
+// `column-def` without dragging `tool-provider` into the import set of
+// `full-extension` (which would collide with its export of tool-provider).
+// ----------------------------------------------------------------------------
+
+interface types {
+    record column-def {
+        name: string,
+        alias: string,
+        dtype: string,
+    }
+}
+
+// ----------------------------------------------------------------------------
 // Exported interfaces (extension -> host)
 // ----------------------------------------------------------------------------
 
@@ -22,6 +37,8 @@ interface extension {
 
 // Data tools: list + execute. Module-level functions (no resource).
 interface tool-provider {
+    use types.{column-def};
+
     record activity {
         present: string,
         past: string,
@@ -35,12 +52,6 @@ interface tool-provider {
         schema: string,
         cacheable: bool,
         activity: option<activity>,
-    }
-
-    record column-def {
-        name: string,
-        alias: string,
-        dtype: string,
     }
 
     record text-output {
@@ -118,7 +129,7 @@ interface formula-provider {
 
 // Streaming cursor access to host-managed data.
 interface host-data {
-    use tool-provider.{column-def};
+    use types.{column-def};
 
     resource cursor {
         open: static func(resource-id: string, query: string) -> result<cursor, string>;

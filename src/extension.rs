@@ -14,6 +14,7 @@ use flate2::read::GzDecoder;
 use tar::Archive;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+use crate::host_data::DataRegistry;
 use crate::manifest::{Manifest, RawManifest};
 use crate::wasm::{self, Request};
 use crate::{Error, ManifestTool, block, formula};
@@ -36,6 +37,9 @@ pub struct Extension {
     /// True when the extension exports the `formula-provider` interface.
     /// Gates [`Extension::formula`](Self::formula).
     has_formula: bool,
+    /// True when the extension was loaded against a world that imports
+    /// `host-data` (currently only `full-extension`).
+    has_host_data: bool,
 }
 
 /// Metadata captured from `extension::get-metadata` during init, kept on the
@@ -49,19 +53,44 @@ struct CachedMetadata {
 }
 
 impl Extension {
-    /// Load an extension from a `.empkg` package file on disk.
+    /// Load an extension from a `.empkg` package file on disk. Uses an
+    /// empty host-data registry — callers that need to expose resources
+    /// to the extension should use [`Self::load_with_data`].
     pub async fn load(path: impl AsRef<Path>, config: serde_json::Value) -> Result<Self, Error> {
-        let bytes = tokio::fs::read(path.as_ref()).await?;
-        Self::from_bytes(&bytes, config).await
+        Self::load_with_data(path, config, DataRegistry::default()).await
     }
 
-    /// Load an extension from pre-read package bytes.
+    /// Load an extension from pre-read package bytes. Uses an empty
+    /// host-data registry — see [`Self::from_bytes_with_data`] for the
+    /// host-data-enabled form.
     pub async fn from_bytes(bytes: &[u8], config: serde_json::Value) -> Result<Self, Error> {
+        Self::from_bytes_with_data(bytes, config, DataRegistry::default()).await
+    }
+
+    /// Load an extension from a `.empkg` file, providing a [`DataRegistry`]
+    /// that an extension loaded against `full-extension` can stream from.
+    pub async fn load_with_data(
+        path: impl AsRef<Path>,
+        config: serde_json::Value,
+        data: DataRegistry,
+    ) -> Result<Self, Error> {
+        let bytes = tokio::fs::read(path.as_ref()).await?;
+        Self::from_bytes_with_data(&bytes, config, data).await
+    }
+
+    /// Load an extension from pre-read package bytes, providing a
+    /// [`DataRegistry`] that an extension loaded against `full-extension`
+    /// can stream from.
+    pub async fn from_bytes_with_data(
+        bytes: &[u8],
+        config: serde_json::Value,
+        data: DataRegistry,
+    ) -> Result<Self, Error> {
         let (manifest, wasm_bytes) = extract_package(bytes)?;
         let manifest = Arc::new(manifest);
         let config_str = serde_json::to_string(&config)?;
 
-        let worker = wasm::spawn_worker(manifest.clone(), wasm_bytes, config_str).await?;
+        let worker = wasm::spawn_worker(manifest.clone(), wasm_bytes, config_str, data).await?;
 
         let metadata = CachedMetadata {
             id: worker.metadata.id,
@@ -78,6 +107,7 @@ impl Extension {
             events: worker.events,
             has_block: worker.has_block,
             has_formula: worker.has_formula,
+            has_host_data: worker.has_host_data,
         })
     }
 
@@ -170,6 +200,12 @@ impl Extension {
     pub fn formula(&self) -> Option<formula::Provider> {
         self.has_formula.then(|| formula::Provider::new(self.requests.clone()))
     }
+
+    /// True when the extension was loaded against `full-extension` and can
+    /// open host-data cursors via its import of the `host-data` interface.
+    pub fn has_host_data(&self) -> bool {
+        self.has_host_data
+    }
 }
 
 // Compile-time guarantee: `Extension` must stay `Send + Sync` so host apps
@@ -187,6 +223,7 @@ impl std::fmt::Debug for Extension {
             .field("version", &self.metadata.version)
             .field("has_block", &self.has_block)
             .field("has_formula", &self.has_formula)
+            .field("has_host_data", &self.has_host_data)
             .finish()
     }
 }

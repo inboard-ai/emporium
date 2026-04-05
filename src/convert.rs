@@ -14,7 +14,7 @@
 use emporium_core::{block, column, event, formula, plan, tool};
 
 use crate::Error;
-use crate::wasm::{block_bindings, rich_bindings, tool_bindings};
+use crate::wasm::{block_bindings, full_bindings, rich_bindings, tool_bindings};
 
 // ---------------------------------------------------------------------------
 // tool-extension world (`tool_bindings`)
@@ -446,6 +446,188 @@ impl From<wit_block_provider_rich::PlanOutcome> for plan::Outcome {
 impl TryFrom<wit_formula_provider_rich::FormulaDef> for formula::Def {
     type Error = Error;
     fn try_from(def: wit_formula_provider_rich::FormulaDef) -> Result<Self, Self::Error> {
+        let schema: serde_json::Value = if def.schema.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_str(&def.schema)?
+        };
+        Ok(formula::Def {
+            name: def.name,
+            description: def.description,
+            schema,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// full-extension world (`full_bindings`)
+// ---------------------------------------------------------------------------
+
+use full_bindings::emporium::extensions::{host_events as wit_host_events_full, types as wit_types_full};
+use full_bindings::exports::emporium::extensions::{
+    block_provider as wit_block_provider_full, formula_provider as wit_formula_provider_full,
+    tool_provider as wit_tool_provider_full,
+};
+
+impl From<wit_tool_provider_full::Activity> for tool::Activity {
+    fn from(a: wit_tool_provider_full::Activity) -> Self {
+        tool::Activity {
+            present: a.present,
+            past: a.past,
+            subject_field: a.subject_field,
+        }
+    }
+}
+
+impl TryFrom<wit_tool_provider_full::ToolInfo> for tool::Info {
+    type Error = Error;
+    fn try_from(info: wit_tool_provider_full::ToolInfo) -> Result<Self, Self::Error> {
+        let schema: serde_json::Value = if info.schema.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_str(&info.schema)?
+        };
+        Ok(tool::Info {
+            id: info.id,
+            name: info.name,
+            description: info.description,
+            schema,
+            cacheable: info.cacheable,
+            activity: info.activity.map(tool::Activity::from),
+        })
+    }
+}
+
+impl From<wit_types_full::ColumnDef> for column::Def {
+    fn from(c: wit_types_full::ColumnDef) -> Self {
+        column::Def {
+            name: c.name,
+            alias: c.alias,
+            dtype: c.dtype,
+        }
+    }
+}
+
+// Reverse conversion for the host-side `host-data::get-schema` return value:
+// the host owns the canonical `column::Def` and hands it back over the WIT
+// boundary as the bindgen-generated `ColumnDef` record.
+impl From<column::Def> for wit_types_full::ColumnDef {
+    fn from(c: column::Def) -> Self {
+        wit_types_full::ColumnDef {
+            name: c.name,
+            alias: c.alias,
+            dtype: c.dtype,
+        }
+    }
+}
+
+impl From<wit_tool_provider_full::TextOutput> for tool::Text {
+    fn from(t: wit_tool_provider_full::TextOutput) -> Self {
+        tool::Text {
+            content: t.content,
+            label: t.label.map(tool::Label::new),
+            source: t.source,
+            store: t.store,
+            description: t.description,
+            nickname: t.nickname,
+        }
+    }
+}
+
+impl TryFrom<wit_tool_provider_full::DataFrameOutput> for tool::DataFrame {
+    type Error = Error;
+    fn try_from(df: wit_tool_provider_full::DataFrameOutput) -> Result<Self, Self::Error> {
+        let schema: Vec<column::Def> = df.schema.into_iter().map(column::Def::from).collect();
+        let data: serde_json::Value = if df.rows.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_str(&df.rows)?
+        };
+        let metadata = match df.metadata {
+            Some(s) if !s.is_empty() => Some(serde_json::from_str::<serde_json::Value>(&s)?),
+            _ => None,
+        };
+        Ok(tool::DataFrame {
+            schema,
+            data,
+            metadata,
+            label: df.label.map(tool::Label::new),
+            source: df.source,
+            store: df.store,
+            description: df.description,
+            nickname: df.nickname,
+        })
+    }
+}
+
+impl TryFrom<wit_tool_provider_full::ToolOutput> for tool::Output {
+    type Error = Error;
+    fn try_from(out: wit_tool_provider_full::ToolOutput) -> Result<Self, Self::Error> {
+        match out {
+            wit_tool_provider_full::ToolOutput::TextOutput(t) => Ok(tool::Output::Text(t.into())),
+            wit_tool_provider_full::ToolOutput::DataFrameOutput(df) => Ok(tool::Output::DataFrame(df.try_into()?)),
+        }
+    }
+}
+
+impl From<wit_host_events_full::Progress> for event::Progress {
+    fn from(p: wit_host_events_full::Progress) -> Self {
+        event::Progress {
+            percent: p.percent,
+            message: p.message,
+        }
+    }
+}
+
+impl From<wit_host_events_full::Invalidate> for event::Invalidate {
+    fn from(i: wit_host_events_full::Invalidate) -> Self {
+        match i {
+            wit_host_events_full::Invalidate::Resource(id) => event::Invalidate::Resource(id),
+            wit_host_events_full::Invalidate::Tool(name) => event::Invalidate::Tool(name),
+            wit_host_events_full::Invalidate::All => event::Invalidate::All,
+        }
+    }
+}
+
+impl From<wit_host_events_full::Event> for event::Event {
+    fn from(e: wit_host_events_full::Event) -> Self {
+        match e {
+            wit_host_events_full::Event::Progress(p) => event::Event::Progress(p.into()),
+            wit_host_events_full::Event::ToolsChanged => event::Event::ToolsChanged,
+            wit_host_events_full::Event::Invalidate(i) => event::Event::Invalidate(i.into()),
+        }
+    }
+}
+
+impl From<wit_block_provider_full::BlockTypeInfo> for block::TypeInfo {
+    fn from(info: wit_block_provider_full::BlockTypeInfo) -> Self {
+        block::TypeInfo {
+            kind: info.kind,
+            name: info.name,
+            description: info.description,
+        }
+    }
+}
+
+impl From<wit_block_provider_full::PlanOutcome> for plan::Outcome {
+    fn from(outcome: wit_block_provider_full::PlanOutcome) -> Self {
+        match outcome {
+            wit_block_provider_full::PlanOutcome::StateUpdate(s) => plan::Outcome::StateUpdate(s),
+            wit_block_provider_full::PlanOutcome::Query(q) => plan::Outcome::Query(q),
+            wit_block_provider_full::PlanOutcome::StateUpdateWithQuery((s, q)) => {
+                plan::Outcome::StateUpdateWithQuery(s, q)
+            }
+            wit_block_provider_full::PlanOutcome::Computed(c) => plan::Outcome::Computed(c),
+            wit_block_provider_full::PlanOutcome::StateUpdateWithComputed((s, c)) => {
+                plan::Outcome::StateUpdateWithComputed(s, c)
+            }
+        }
+    }
+}
+
+impl TryFrom<wit_formula_provider_full::FormulaDef> for formula::Def {
+    type Error = Error;
+    fn try_from(def: wit_formula_provider_full::FormulaDef) -> Result<Self, Self::Error> {
         let schema: serde_json::Value = if def.schema.is_empty() {
             serde_json::Value::Null
         } else {

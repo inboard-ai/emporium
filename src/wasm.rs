@@ -33,6 +33,9 @@ pub(crate) const BLOCK_WORLD: &str = "block-extension";
 /// World name for the rich-extension capability tier (block + formula).
 pub(crate) const RICH_WORLD: &str = "rich-extension";
 
+/// World name for the full-extension capability tier (rich + host-data).
+pub(crate) const FULL_WORLD: &str = "full-extension";
+
 /// Broadcast capacity for the host-events channel, per MAP_PLAN.
 const EVENT_CAPACITY: usize = 256;
 
@@ -93,6 +96,28 @@ pub(crate) mod rich_bindings {
 use rich_bindings::RichExtension;
 use rich_bindings::emporium::extensions::host_events as wit_host_events_rich;
 
+/// wasmtime bindings for the `full-extension` world.
+///
+/// Bindgen produces `FullExtension`, `FullExtensionPre`, the host-events
+/// `Host` trait, the `host-data` `Host` + `HostCursor` traits (imports), and
+/// the `exports::emporium::extensions::*` type records. Like the other
+/// modules, all shared types are regenerated as DISTINCT Rust types.
+#[allow(clippy::all)]
+pub(crate) mod full_bindings {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "full-extension",
+        imports: { default: async },
+        exports: { default: async },
+        with: {
+            "emporium:extensions/host-data@0.2.0.cursor": crate::host_data::Cursor,
+        },
+    });
+}
+
+use full_bindings::FullExtension;
+use full_bindings::emporium::extensions::{host_data as wit_host_data, host_events as wit_host_events_full};
+
 /// Handle returned from [`spawn_worker`]: gives the caller the means to send
 /// requests and subscribe to events. The worker thread keeps running as long
 /// as any clone of `requests` survives.
@@ -110,6 +135,9 @@ pub(crate) struct Worker {
     /// True when the extension was loaded against a world that exports
     /// `formula-provider`. Gates [`Extension::formula`](crate::Extension::formula).
     pub(crate) has_formula: bool,
+    /// True when the extension was loaded against a world that imports
+    /// `host-data` (currently only `full-extension`).
+    pub(crate) has_host_data: bool,
 }
 
 /// Metadata captured from `extension::get-metadata` at init, in a
@@ -150,6 +178,17 @@ impl From<block_bindings::exports::emporium::extensions::extension::Metadata> fo
 
 impl From<rich_bindings::exports::emporium::extensions::extension::Metadata> for WorkerMetadata {
     fn from(m: rich_bindings::exports::emporium::extensions::extension::Metadata) -> Self {
+        WorkerMetadata {
+            id: m.id,
+            name: m.name,
+            version: m.version,
+            description: m.description,
+        }
+    }
+}
+
+impl From<full_bindings::exports::emporium::extensions::extension::Metadata> for WorkerMetadata {
+    fn from(m: full_bindings::exports::emporium::extensions::extension::Metadata) -> Self {
         WorkerMetadata {
             id: m.id,
             name: m.name,
@@ -247,12 +286,13 @@ pub(crate) enum Request {
 }
 
 /// Per-store state for wasmtime: WASI context, HTTP context, a resource
-/// table, and the host-events broadcast sender.
+/// table, the host-events broadcast sender, and the host-data registry.
 pub(crate) struct State {
     wasi: WasiCtx,
     http: WasiHttpCtx,
     table: ResourceTable,
     events: broadcast::Sender<event::Event>,
+    data: crate::host_data::DataRegistry,
 }
 
 impl WasiView for State {
@@ -299,6 +339,106 @@ impl wit_host_events_rich::Host for State {
     }
 }
 
+impl wit_host_events_full::Host for State {
+    async fn notify(&mut self, event: wit_host_events_full::Event) {
+        let core_event: event::Event = event.into();
+        tracing::info!(?core_event, "host-events: received notify from extension");
+        let _ = self.events.send(core_event);
+    }
+}
+
+// The `types` interface has no methods — its Host trait is empty but must
+// still be implemented on State for every bindings module that references
+// `column-def` (tool-provider in every world, host-data in full-extension).
+impl tool_bindings::emporium::extensions::types::Host for State {}
+impl block_bindings::emporium::extensions::types::Host for State {}
+impl rich_bindings::emporium::extensions::types::Host for State {}
+impl full_bindings::emporium::extensions::types::Host for State {}
+
+// host-data Host + HostCursor impls (full-extension world only).
+//
+// The `with:` option on the `full_bindings` bindgen! invocation remaps the
+// bindgen marker `Cursor` to our own [`crate::host_data::Cursor`], so
+// `Resource<wit_host_data::Cursor>` is identical to
+// `Resource<crate::host_data::Cursor>` — we can push/get/delete directly.
+impl wit_host_data::HostCursor for State {
+    async fn open(
+        &mut self,
+        resource_id: String,
+        query: String,
+    ) -> Result<wasmtime::component::Resource<wit_host_data::Cursor>, String> {
+        if self.data.schema(&resource_id).is_none() {
+            return Err(format!("unknown resource: {resource_id}"));
+        }
+        let cursor = crate::host_data::Cursor {
+            resource_id,
+            offset: 0,
+            query: Some(query),
+        };
+        let handle = self
+            .table
+            .push(cursor)
+            .map_err(|e| format!("resource table push: {e}"))?;
+        Ok(handle)
+    }
+
+    async fn next_batch(
+        &mut self,
+        self_: wasmtime::component::Resource<wit_host_data::Cursor>,
+        batch_size: u32,
+    ) -> Result<Option<String>, String> {
+        let cursor = self
+            .table
+            .get_mut(&self_)
+            .map_err(|e| format!("resource table get: {e}"))?;
+        let slice = self
+            .data
+            .slice(&cursor.resource_id, cursor.offset, batch_size as usize)
+            .ok_or_else(|| format!("unknown resource: {}", cursor.resource_id))?;
+        if slice.is_empty() {
+            return Ok(None);
+        }
+        cursor.offset += slice.len();
+        let body = serde_json::Value::Array(slice);
+        let s = serde_json::to_string(&body).map_err(|e| format!("serialize batch: {e}"))?;
+        Ok(Some(s))
+    }
+
+    async fn close(&mut self, _handle: wasmtime::component::Resource<wit_host_data::Cursor>) {
+        // `close` receives a BORROWED handle (WIT method convention); we
+        // cannot delete it from the resource table here. Freeing the slot
+        // happens when the guest drops its owning handle, which fires the
+        // `drop` hook below. We keep `close` as a user-visible no-op hook
+        // — future enhancements (tearing down a streaming read) could
+        // reach through the borrow via `table.get_mut` to mark state.
+    }
+
+    async fn drop(&mut self, rep: wasmtime::component::Resource<wit_host_data::Cursor>) -> wasmtime::Result<()> {
+        // `drop` receives the OWNING handle as the guest releases it.
+        // Delete the backing `Cursor` from the resource table. A missing
+        // entry would indicate a wasmtime accounting bug — swallow it so
+        // the worker doesn't die on what is at worst a leak.
+        let _ = self.table.delete(rep);
+        Ok(())
+    }
+}
+
+impl wit_host_data::Host for State {
+    async fn get_schema(&mut self, resource_id: String) -> Result<Vec<wit_host_data::ColumnDef>, String> {
+        let schema = self
+            .data
+            .schema(&resource_id)
+            .ok_or_else(|| format!("unknown resource: {resource_id}"))?;
+        Ok(schema.into_iter().map(Into::into).collect())
+    }
+
+    async fn row_count(&mut self, resource_id: String) -> Result<u64, String> {
+        self.data
+            .row_count(&resource_id)
+            .ok_or_else(|| format!("unknown resource: {resource_id}"))
+    }
+}
+
 /// Helper used by bindgen's `add_to_linker` — projects `&mut State` into the
 /// host-events handler's associated `Data<'a>` type.
 struct HostEventsData;
@@ -318,12 +458,14 @@ pub(crate) async fn spawn_worker(
     manifest: Arc<Manifest>,
     wasm_bytes: Vec<u8>,
     config: String,
+    data: crate::host_data::DataRegistry,
 ) -> Result<Worker, Error> {
     let world = manifest.world().to_string();
     let route = match world.as_str() {
         DEFAULT_WORLD => WorkerRoute::Tool,
         BLOCK_WORLD => WorkerRoute::Block,
         RICH_WORLD => WorkerRoute::Rich,
+        FULL_WORLD => WorkerRoute::Full,
         other => return Err(Error::UnsupportedWorld(other.to_string())),
     };
 
@@ -344,15 +486,38 @@ pub(crate) async fn spawn_worker(
                     }
                 };
                 match route {
-                    WorkerRoute::Tool => {
-                        runtime.block_on(run_tool_worker(wasm_bytes, config, event_tx_thread, meta_tx, req_rx))
-                    }
-                    WorkerRoute::Block => {
-                        runtime.block_on(run_block_worker(wasm_bytes, config, event_tx_thread, meta_tx, req_rx))
-                    }
-                    WorkerRoute::Rich => {
-                        runtime.block_on(run_rich_worker(wasm_bytes, config, event_tx_thread, meta_tx, req_rx))
-                    }
+                    WorkerRoute::Tool => runtime.block_on(run_tool_worker(
+                        wasm_bytes,
+                        config,
+                        event_tx_thread,
+                        data,
+                        meta_tx,
+                        req_rx,
+                    )),
+                    WorkerRoute::Block => runtime.block_on(run_block_worker(
+                        wasm_bytes,
+                        config,
+                        event_tx_thread,
+                        data,
+                        meta_tx,
+                        req_rx,
+                    )),
+                    WorkerRoute::Rich => runtime.block_on(run_rich_worker(
+                        wasm_bytes,
+                        config,
+                        event_tx_thread,
+                        data,
+                        meta_tx,
+                        req_rx,
+                    )),
+                    WorkerRoute::Full => runtime.block_on(run_full_worker(
+                        wasm_bytes,
+                        config,
+                        event_tx_thread,
+                        data,
+                        meta_tx,
+                        req_rx,
+                    )),
                 }
             }));
             if let Err(payload) = outcome {
@@ -371,8 +536,9 @@ pub(crate) async fn spawn_worker(
         requests: req_tx,
         events: event_tx,
         metadata: bootstrap.metadata,
-        has_block: matches!(route, WorkerRoute::Block | WorkerRoute::Rich),
-        has_formula: matches!(route, WorkerRoute::Rich),
+        has_block: matches!(route, WorkerRoute::Block | WorkerRoute::Rich | WorkerRoute::Full),
+        has_formula: matches!(route, WorkerRoute::Rich | WorkerRoute::Full),
+        has_host_data: matches!(route, WorkerRoute::Full),
     })
 }
 
@@ -385,6 +551,8 @@ enum WorkerRoute {
     Block,
     /// `rich-extension` world — adds formula-provider on top of block.
     Rich,
+    /// `full-extension` world — adds the host-data import on top of rich.
+    Full,
 }
 
 /// Internal payload delivered through the meta oneshot on successful init.
@@ -399,11 +567,12 @@ async fn run_tool_worker(
     wasm_bytes: Vec<u8>,
     config: String,
     event_tx: broadcast::Sender<event::Event>,
+    data: crate::host_data::DataRegistry,
     meta_tx: oneshot::Sender<Result<WorkerBootstrap, Error>>,
     mut req_rx: mpsc::UnboundedReceiver<Request>,
 ) {
     // Fused init sequence: on any failure, send Err through meta_tx and exit.
-    let init = match initialize_tool(wasm_bytes, config, event_tx).await {
+    let init = match initialize_tool(wasm_bytes, config, event_tx, data).await {
         Ok(ok) => ok,
         Err(err) => {
             let _ = meta_tx.send(Err(err));
@@ -436,10 +605,11 @@ async fn run_block_worker(
     wasm_bytes: Vec<u8>,
     config: String,
     event_tx: broadcast::Sender<event::Event>,
+    data: crate::host_data::DataRegistry,
     meta_tx: oneshot::Sender<Result<WorkerBootstrap, Error>>,
     mut req_rx: mpsc::UnboundedReceiver<Request>,
 ) {
-    let init = match initialize_block(wasm_bytes, config, event_tx).await {
+    let init = match initialize_block(wasm_bytes, config, event_tx, data).await {
         Ok(ok) => ok,
         Err(err) => {
             let _ = meta_tx.send(Err(err));
@@ -471,10 +641,11 @@ async fn run_rich_worker(
     wasm_bytes: Vec<u8>,
     config: String,
     event_tx: broadcast::Sender<event::Event>,
+    data: crate::host_data::DataRegistry,
     meta_tx: oneshot::Sender<Result<WorkerBootstrap, Error>>,
     mut req_rx: mpsc::UnboundedReceiver<Request>,
 ) {
-    let init = match initialize_rich(wasm_bytes, config, event_tx).await {
+    let init = match initialize_rich(wasm_bytes, config, event_tx, data).await {
         Ok(ok) => ok,
         Err(err) => {
             let _ = meta_tx.send(Err(err));
@@ -501,6 +672,42 @@ async fn run_rich_worker(
     }
 }
 
+/// The async body that runs the `full-extension` world worker.
+async fn run_full_worker(
+    wasm_bytes: Vec<u8>,
+    config: String,
+    event_tx: broadcast::Sender<event::Event>,
+    data: crate::host_data::DataRegistry,
+    meta_tx: oneshot::Sender<Result<WorkerBootstrap, Error>>,
+    mut req_rx: mpsc::UnboundedReceiver<Request>,
+) {
+    let init = match initialize_full(wasm_bytes, config, event_tx, data).await {
+        Ok(ok) => ok,
+        Err(err) => {
+            let _ = meta_tx.send(Err(err));
+            return;
+        }
+    };
+    let InitializedFull {
+        bindings,
+        mut store,
+        metadata,
+    } = init;
+
+    if meta_tx
+        .send(Ok(WorkerBootstrap {
+            metadata: metadata.into(),
+        }))
+        .is_err()
+    {
+        return;
+    }
+
+    while let Some(request) = req_rx.recv().await {
+        handle_full_request(request, &bindings, &mut store).await;
+    }
+}
+
 /// Output of the tool-extension initialization phase.
 struct InitializedTool {
     bindings: ToolExtension,
@@ -522,13 +729,21 @@ struct InitializedRich {
     metadata: rich_bindings::exports::emporium::extensions::extension::Metadata,
 }
 
+/// Output of the full-extension initialization phase.
+struct InitializedFull {
+    bindings: FullExtension,
+    store: Store<State>,
+    metadata: full_bindings::exports::emporium::extensions::extension::Metadata,
+}
+
 /// Compile, instantiate, `init`, and capture metadata for tool-extension.
 async fn initialize_tool(
     wasm_bytes: Vec<u8>,
     config: String,
     event_tx: broadcast::Sender<event::Event>,
+    data: crate::host_data::DataRegistry,
 ) -> Result<InitializedTool, Error> {
-    let (engine, component, mut store) = prepare_component(&wasm_bytes, event_tx)?;
+    let (engine, component, mut store) = prepare_component(&wasm_bytes, event_tx, data)?;
 
     validate_world_exports(DEFAULT_WORLD, &engine, &component)?;
 
@@ -555,8 +770,9 @@ async fn initialize_block(
     wasm_bytes: Vec<u8>,
     config: String,
     event_tx: broadcast::Sender<event::Event>,
+    data: crate::host_data::DataRegistry,
 ) -> Result<InitializedBlock, Error> {
-    let (engine, component, mut store) = prepare_component(&wasm_bytes, event_tx)?;
+    let (engine, component, mut store) = prepare_component(&wasm_bytes, event_tx, data)?;
 
     validate_world_exports(BLOCK_WORLD, &engine, &component)?;
 
@@ -582,8 +798,9 @@ async fn initialize_rich(
     wasm_bytes: Vec<u8>,
     config: String,
     event_tx: broadcast::Sender<event::Event>,
+    data: crate::host_data::DataRegistry,
 ) -> Result<InitializedRich, Error> {
-    let (engine, component, mut store) = prepare_component(&wasm_bytes, event_tx)?;
+    let (engine, component, mut store) = prepare_component(&wasm_bytes, event_tx, data)?;
 
     validate_world_exports(RICH_WORLD, &engine, &component)?;
 
@@ -604,11 +821,40 @@ async fn initialize_rich(
     })
 }
 
+/// Compile, instantiate, `init`, and capture metadata for full-extension.
+async fn initialize_full(
+    wasm_bytes: Vec<u8>,
+    config: String,
+    event_tx: broadcast::Sender<event::Event>,
+    data: crate::host_data::DataRegistry,
+) -> Result<InitializedFull, Error> {
+    let (engine, component, mut store) = prepare_component(&wasm_bytes, event_tx, data)?;
+
+    validate_world_exports(FULL_WORLD, &engine, &component)?;
+
+    let linker = build_full_linker(&engine)?;
+    let bindings = FullExtension::instantiate_async(&mut store, &component, &linker).await?;
+
+    let ext_guest = bindings.emporium_extensions_extension();
+    let metadata = ext_guest.call_get_metadata(&mut store).await?;
+    let init_result = ext_guest.call_init(&mut store, &config).await?;
+    if let Err(msg) = init_result {
+        return Err(Error::ExtensionLoadError(msg));
+    }
+
+    Ok(InitializedFull {
+        bindings,
+        store,
+        metadata,
+    })
+}
+
 /// Compile the component and build the wasmtime store with shared WASI/HTTP
 /// + host-events context. Used by both world-specific initialization paths.
 fn prepare_component(
     wasm_bytes: &[u8],
     event_tx: broadcast::Sender<event::Event>,
+    data: crate::host_data::DataRegistry,
 ) -> Result<(Engine, Component, Store<State>), Error> {
     let mut cfg = Config::new();
     cfg.wasm_component_model(true);
@@ -621,6 +867,7 @@ fn prepare_component(
         http: WasiHttpCtx::new(),
         table: ResourceTable::new(),
         events: event_tx,
+        data,
     };
     let store = Store::new(&engine, state);
     Ok((engine, component, store))
@@ -647,6 +894,14 @@ fn build_rich_linker(engine: &Engine) -> Result<Linker<State>, Error> {
     Ok(linker)
 }
 
+/// Register WASI, WASI-HTTP, host-events, host-data (and the auto-added
+/// `types` import) for full-extension.
+fn build_full_linker(engine: &Engine) -> Result<Linker<State>, Error> {
+    let mut linker = build_base_linker(engine)?;
+    FullExtension::add_to_linker::<State, HostEventsData>(&mut linker, |s| s)?;
+    Ok(linker)
+}
+
 /// Base linker shared by all worlds: WASI + WASI-HTTP. Each world-specific
 /// linker is built on top.
 fn build_base_linker(engine: &Engine) -> Result<Linker<State>, Error> {
@@ -670,6 +925,7 @@ fn validate_world_exports(declared: &str, engine: &Engine, component: &Component
         DEFAULT_WORLD => &["extension", "tool-provider"],
         BLOCK_WORLD => &["extension", "tool-provider", "block-provider"],
         RICH_WORLD => &["extension", "tool-provider", "block-provider", "formula-provider"],
+        FULL_WORLD => &["extension", "tool-provider", "block-provider", "formula-provider"],
         other => return Err(Error::UnsupportedWorld(other.to_string())),
     };
 
@@ -1035,6 +1291,145 @@ async fn rich_formula_evaluate(
     wit_outcome.map_err(Error::FormulaOperation)
 }
 
+/// Dispatch a single typed [`Request`] against the full-extension bindings.
+/// Handles every variant, just like rich-extension — the extra capability
+/// in this world is the host-data import, which is not request-driven.
+async fn handle_full_request(request: Request, bindings: &FullExtension, store: &mut Store<State>) {
+    match request {
+        Request::ListTools { reply } => {
+            let outcome = full_list_tools(bindings, store).await;
+            let _ = reply.send(outcome);
+        }
+        Request::ExecuteTool { name, params, reply } => {
+            let outcome = full_execute_tool(bindings, store, &name, &params).await;
+            let _ = reply.send(outcome);
+        }
+        Request::View { reply } => {
+            let outcome = full_view(bindings, store).await;
+            let _ = reply.send(outcome);
+        }
+        Request::BlockTypes { reply } => {
+            let outcome = full_block_types(bindings, store).await;
+            let _ = reply.send(outcome);
+        }
+        Request::BlockCreate { kind, input, reply } => {
+            let outcome = full_block_create(bindings, store, &kind, &input).await;
+            let _ = reply.send(outcome);
+        }
+        Request::BlockPlan {
+            kind,
+            state,
+            operation,
+            input,
+            reply,
+        } => {
+            let outcome = full_block_plan(bindings, store, &kind, &state, &operation, &input).await;
+            let _ = reply.send(outcome);
+        }
+        Request::BlockValidate { kind, state, reply } => {
+            let outcome = full_block_validate(bindings, store, &kind, &state).await;
+            let _ = reply.send(outcome);
+        }
+        Request::FormulaDefs { reply } => {
+            let outcome = full_formula_defs(bindings, store).await;
+            let _ = reply.send(outcome);
+        }
+        Request::FormulaEvaluate { name, args, reply } => {
+            let outcome = full_formula_evaluate(bindings, store, &name, &args).await;
+            let _ = reply.send(outcome);
+        }
+    }
+}
+
+async fn full_list_tools(bindings: &FullExtension, store: &mut Store<State>) -> Result<Vec<tool::Info>, Error> {
+    let guest = bindings.emporium_extensions_tool_provider();
+    let wit_tools = guest.call_list_tools(&mut *store).await?;
+    wit_tools
+        .into_iter()
+        .map(tool::Info::try_from)
+        .collect::<Result<Vec<_>, _>>()
+}
+
+async fn full_execute_tool(
+    bindings: &FullExtension,
+    store: &mut Store<State>,
+    name: &str,
+    params: &str,
+) -> Result<tool::Output, Error> {
+    let guest = bindings.emporium_extensions_tool_provider();
+    let wit_outcome = guest.call_execute_tool(&mut *store, name, params).await?;
+    let wit_output = wit_outcome.map_err(Error::ExtensionError)?;
+    tool::Output::try_from(wit_output)
+}
+
+async fn full_view(bindings: &FullExtension, store: &mut Store<State>) -> Result<String, Error> {
+    let guest = bindings.emporium_extensions_extension();
+    let s = guest.call_view(&mut *store).await?;
+    Ok(s)
+}
+
+async fn full_block_types(bindings: &FullExtension, store: &mut Store<State>) -> Result<Vec<block::TypeInfo>, Error> {
+    let guest = bindings.emporium_extensions_block_provider();
+    let wit_types = guest.call_get_block_types(&mut *store).await?;
+    Ok(wit_types.into_iter().map(block::TypeInfo::from).collect())
+}
+
+async fn full_block_create(
+    bindings: &FullExtension,
+    store: &mut Store<State>,
+    kind: &str,
+    input: &str,
+) -> Result<String, Error> {
+    let guest = bindings.emporium_extensions_block_provider();
+    let wit_outcome = guest.call_create(&mut *store, kind, input).await?;
+    wit_outcome.map_err(Error::BlockOperation)
+}
+
+async fn full_block_plan(
+    bindings: &FullExtension,
+    store: &mut Store<State>,
+    kind: &str,
+    state: &str,
+    operation: &str,
+    input: &str,
+) -> Result<plan::Outcome, Error> {
+    let guest = bindings.emporium_extensions_block_provider();
+    let wit_outcome = guest.call_plan(&mut *store, kind, state, operation, input).await?;
+    let wit_plan = wit_outcome.map_err(Error::BlockOperation)?;
+    Ok(plan::Outcome::from(wit_plan))
+}
+
+async fn full_block_validate(
+    bindings: &FullExtension,
+    store: &mut Store<State>,
+    kind: &str,
+    state: &str,
+) -> Result<(), Error> {
+    let guest = bindings.emporium_extensions_block_provider();
+    let wit_outcome = guest.call_validate(&mut *store, kind, state).await?;
+    wit_outcome.map_err(Error::BlockOperation)
+}
+
+async fn full_formula_defs(bindings: &FullExtension, store: &mut Store<State>) -> Result<Vec<formula::Def>, Error> {
+    let guest = bindings.emporium_extensions_formula_provider();
+    let wit_defs = guest.call_get_formulas(&mut *store).await?;
+    wit_defs
+        .into_iter()
+        .map(formula::Def::try_from)
+        .collect::<Result<Vec<_>, _>>()
+}
+
+async fn full_formula_evaluate(
+    bindings: &FullExtension,
+    store: &mut Store<State>,
+    name: &str,
+    args: &str,
+) -> Result<String, Error> {
+    let guest = bindings.emporium_extensions_formula_provider();
+    let wit_outcome = guest.call_evaluate(&mut *store, name, args).await?;
+    wit_outcome.map_err(Error::FormulaOperation)
+}
+
 // Conversions from wasmtime-bindgen types to canonical core types live in
 // `src/convert.rs` — one set of From/TryFrom impls per bindings module.
 
@@ -1271,5 +1666,83 @@ mod tests {
         assert_eq!(info.kind, "prefix-tracker");
         assert_eq!(info.name, "Prefix Tracker");
         assert_eq!(info.description, "Tracks key prefixes in the KV store");
+    }
+
+    #[test]
+    fn full_extension_world_required_exports_match_rich() {
+        // The full-extension world adds the host-data IMPORT on top of
+        // rich-extension; its required EXPORTS are identical to rich's.
+        // Verify by instantiating components via the validator path — we
+        // use get_required_exports_for_test which mirrors the match arm.
+        let mut cfg = Config::new();
+        cfg.wasm_component_model(true);
+        let engine = Engine::new(&cfg).expect("engine");
+
+        // An empty component fails validation for every world. What we're
+        // checking here is that the `missing` list for `full-extension`
+        // contains exactly the 4 rich-extension exports, no more, no less.
+        let tiny_wat = r#"(component)"#;
+        let component = Component::new(&engine, tiny_wat.as_bytes()).expect("empty component");
+
+        let err = validate_world_exports(FULL_WORLD, &engine, &component).expect_err("empty component must fail");
+        match err {
+            Error::WorldMissingExports { declared, missing } => {
+                assert_eq!(declared, FULL_WORLD);
+                assert_eq!(missing.len(), 4);
+                for iface in ["extension", "tool-provider", "block-provider", "formula-provider"] {
+                    let fq = format!("{WIT_PACKAGE}/{iface}@{WIT_VERSION}");
+                    assert!(
+                        missing.contains(&fq),
+                        "full-extension must require {fq} (got {missing:?})"
+                    );
+                }
+            }
+            other => panic!("unexpected error shape: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_column_def_to_wit_reverse() {
+        // Host-side conversion: the host owns canonical column::Def and
+        // hands back the bindgen ColumnDef on host-data::get-schema.
+        use full_bindings::emporium::extensions::types as wit_types_full;
+
+        let core = emporium_core::column::Def {
+            name: "k".into(),
+            alias: "Key".into(),
+            dtype: "string".into(),
+        };
+        let wit: wit_types_full::ColumnDef = core.into();
+        assert_eq!(wit.name, "k");
+        assert_eq!(wit.alias, "Key");
+        assert_eq!(wit.dtype, "string");
+    }
+
+    #[test]
+    fn unsupported_world_validator_rejects_unknown() {
+        let mut cfg = Config::new();
+        cfg.wasm_component_model(true);
+        let engine = Engine::new(&cfg).expect("engine");
+        let component = Component::new(&engine, r#"(component)"#.as_bytes()).expect("empty component");
+
+        let err =
+            validate_world_exports("nonexistent-world", &engine, &component).expect_err("unknown world must fail");
+        assert!(matches!(err, Error::UnsupportedWorld(_)));
+    }
+
+    #[test]
+    fn full_linker_builds_without_import_export_collision() {
+        // Regression guard: if `host-data` ever drags `tool-provider`
+        // back into the import set of `full-extension`, add_to_linker
+        // would register `emporium:extensions/tool-provider@0.2.0` as
+        // a linker import — colliding with the component's export of
+        // the same interface at instantiation time. The linker build
+        // below must succeed cleanly; absent the WIT `types` interface
+        // refactor this would either fail here or fail later at
+        // FullExtension::instantiate_async against any real component.
+        let mut cfg = Config::new();
+        cfg.wasm_component_model(true);
+        let engine = Engine::new(&cfg).expect("engine");
+        let _linker = build_full_linker(&engine).expect("full-extension linker builds");
     }
 }
