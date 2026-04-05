@@ -147,3 +147,98 @@ impl From<&str> for Error {
         Error::Custom(err.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_display_strings_informative() {
+        let thread_died = Error::ThreadDiedDuringInit;
+        let s = thread_died.to_string();
+        assert!(
+            s.contains("thread") && s.contains("died"),
+            "ThreadDiedDuringInit display should mention 'thread'/'died', got: {s}"
+        );
+
+        let crashed = Error::ExtensionCrashed;
+        let s = crashed.to_string();
+        assert!(
+            s.contains("crashed"),
+            "ExtensionCrashed display should mention 'crashed', got: {s}"
+        );
+
+        let extra = Error::WorldExtraExports {
+            declared: "x".into(),
+            extra: vec!["y".into()],
+        };
+        let s = extra.to_string();
+        assert!(
+            s.contains("declared") || s.contains("x"),
+            "WorldExtraExports display should mention declared/x, got: {s}"
+        );
+        assert!(
+            s.contains("y"),
+            "WorldExtraExports display should mention extras, got: {s}"
+        );
+
+        let send = Error::SendError;
+        assert!(
+            send.to_string().contains("worker"),
+            "SendError display should mention 'worker', got: {}",
+            send
+        );
+
+        let unsupported = Error::UnsupportedWorld("abc".into());
+        assert!(
+            unsupported.to_string().contains("abc"),
+            "UnsupportedWorld display should include world name, got: {unsupported}"
+        );
+    }
+
+    #[test]
+    fn world_extra_exports_serializes_both_fields() {
+        let err = Error::WorldExtraExports {
+            declared: "tool-extension".into(),
+            extra: vec!["emporium:extensions/block-provider".into(), "other".into()],
+        };
+        let s = err.to_string();
+        assert!(s.contains("tool-extension"), "display must include declared: {s}");
+        assert!(
+            s.contains("emporium:extensions/block-provider"),
+            "display must include extras: {s}"
+        );
+        assert!(s.contains("other"), "display must include all extras: {s}");
+    }
+
+    #[test]
+    fn world_missing_exports_serializes_both_fields() {
+        let err = Error::WorldMissingExports {
+            declared: "block-extension".into(),
+            missing: vec!["emporium:extensions/formula-provider".into()],
+        };
+        let s = err.to_string();
+        assert!(s.contains("block-extension"), "display must include declared: {s}");
+        assert!(
+            s.contains("emporium:extensions/formula-provider"),
+            "display must include missing: {s}"
+        );
+    }
+
+    #[test]
+    fn from_emporium_core_error_maps_to_custom() {
+        let core_err = emporium_core::Error::custom("x");
+        let err: Error = core_err.into();
+        match err {
+            Error::Custom(msg) => assert!(msg.contains("x"), "message should preserve 'x', got: {msg}"),
+            other => panic!("expected Custom variant, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_io_error_wraps_in_arc() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "nope");
+        let err: Error = io_err.into();
+        assert!(matches!(err, Error::Io(_)), "expected Io variant, got: {err:?}");
+    }
+}

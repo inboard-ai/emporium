@@ -167,3 +167,174 @@ impl RawManifest {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Error;
+
+    /// Parse a manifest TOML string through the same pipeline used at load
+    /// time. Keeps test bodies focused on the shape under test.
+    fn parse_manifest(toml_str: &str) -> Result<Manifest, Error> {
+        let raw: RawManifest = toml::from_str(toml_str).map_err(|e| Error::Custom(format!("toml parse: {e}")))?;
+        raw.into_manifest()
+    }
+
+    /// Minimal valid manifest. Individual tests append or override the
+    /// `[component]` and other sections as needed.
+    const BASE: &str = r#"
+[extension]
+id = "test"
+name = "Test"
+version = "0.1.0"
+author = "Test"
+license = "MIT"
+
+[component]
+entry = "x.wasm"
+
+[config]
+schema = '{}'
+"#;
+
+    #[test]
+    fn manifest_world_defaults_to_tool_extension_when_absent() {
+        let manifest = parse_manifest(BASE).expect("parse minimal manifest");
+        assert_eq!(manifest.world(), "tool-extension");
+        assert!(manifest.world.is_none());
+    }
+
+    #[test]
+    fn manifest_world_returns_declared_value_when_present() {
+        let toml_str = r#"
+[extension]
+id = "test"
+name = "Test"
+version = "0.1.0"
+author = "Test"
+license = "MIT"
+
+[component]
+entry = "x.wasm"
+world = "block-extension"
+
+[config]
+schema = '{}'
+"#;
+        let manifest = parse_manifest(toml_str).expect("parse block-extension manifest");
+        assert_eq!(manifest.world(), "block-extension");
+        assert_eq!(manifest.world.as_deref(), Some("block-extension"));
+    }
+
+    #[test]
+    fn manifest_world_accepts_full_extension_value() {
+        let toml_str = r#"
+[extension]
+id = "test"
+name = "Test"
+version = "0.1.0"
+author = "Test"
+license = "MIT"
+
+[component]
+entry = "x.wasm"
+world = "full-extension"
+
+[config]
+schema = '{}'
+"#;
+        let manifest = parse_manifest(toml_str).expect("parse full-extension manifest");
+        assert_eq!(manifest.world(), "full-extension");
+    }
+
+    #[test]
+    fn manifest_tools_list_populated_from_raw() {
+        let toml_str = r#"
+[extension]
+id = "test"
+name = "Test"
+version = "0.1.0"
+author = "Test"
+license = "MIT"
+
+[component]
+entry = "x.wasm"
+
+[config]
+schema = '{}'
+
+[[tools]]
+id = "get"
+name = "Get"
+description = "Fetch a value"
+
+[[tools]]
+id = "set"
+name = "Set"
+description = "Store a value"
+"#;
+        let manifest = parse_manifest(toml_str).expect("parse tools manifest");
+        assert_eq!(manifest.tools.len(), 2);
+        assert_eq!(manifest.tools[0].id, "get");
+        assert_eq!(manifest.tools[0].name, "Get");
+        assert_eq!(manifest.tools[0].description, "Fetch a value");
+        assert_eq!(manifest.tools[1].id, "set");
+        assert_eq!(manifest.tools[1].name, "Set");
+        assert_eq!(manifest.tools[1].description, "Store a value");
+    }
+
+    #[test]
+    fn manifest_tools_list_empty_by_default() {
+        let manifest = parse_manifest(BASE).expect("parse minimal manifest");
+        assert!(manifest.tools.is_empty());
+    }
+
+    #[test]
+    fn manifest_capabilities_parsed_as_bool_map() {
+        let toml_str = r#"
+[extension]
+id = "test"
+name = "Test"
+version = "0.1.0"
+author = "Test"
+license = "MIT"
+
+[component]
+entry = "x.wasm"
+
+[config]
+schema = '{}'
+
+[capabilities]
+network = true
+filesystem = false
+"#;
+        let manifest = parse_manifest(toml_str).expect("parse capabilities manifest");
+        assert_eq!(manifest.capabilities.get("network"), Some(&true));
+        assert_eq!(manifest.capabilities.get("filesystem"), Some(&false));
+        assert_eq!(manifest.capabilities.len(), 2);
+    }
+
+    #[test]
+    fn manifest_invalid_config_schema_returns_error() {
+        let toml_str = r#"
+[extension]
+id = "test"
+name = "Test"
+version = "0.1.0"
+author = "Test"
+license = "MIT"
+
+[component]
+entry = "x.wasm"
+
+[config]
+schema = "not valid json{"
+"#;
+        let err = parse_manifest(toml_str).expect_err("invalid schema must fail");
+        assert!(
+            matches!(err, Error::Custom(ref msg) if msg.contains("Invalid config schema JSON")),
+            "expected Custom error with 'Invalid config schema JSON' message, got: {err:?}"
+        );
+    }
+}

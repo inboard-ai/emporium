@@ -1745,4 +1745,74 @@ mod tests {
         let engine = Engine::new(&cfg).expect("engine");
         let _linker = build_full_linker(&engine).expect("full-extension linker builds");
     }
+
+    #[test]
+    fn request_enum_variants_constructible() {
+        // Construct every Request variant with a dummy reply channel and
+        // verify the match arm fires. This pins the Request enum shape:
+        // if a variant is added/removed, this test must update too.
+        let (reply, _rx) = oneshot::channel();
+        assert!(matches!(Request::ListTools { reply }, Request::ListTools { .. }));
+
+        let (reply, _rx) = oneshot::channel();
+        assert!(matches!(
+            Request::ExecuteTool {
+                name: "get".into(),
+                params: "{}".into(),
+                reply,
+            },
+            Request::ExecuteTool { .. }
+        ));
+
+        let (reply, _rx) = oneshot::channel();
+        assert!(matches!(Request::View { reply }, Request::View { .. }));
+
+        let (reply, _rx) = oneshot::channel();
+        assert!(matches!(Request::BlockTypes { reply }, Request::BlockTypes { .. }));
+
+        let (reply, _rx) = oneshot::channel();
+        assert!(matches!(
+            Request::BlockCreate {
+                kind: "k".into(),
+                input: "{}".into(),
+                reply,
+            },
+            Request::BlockCreate { .. }
+        ));
+
+        let (reply, _rx) = oneshot::channel();
+        assert!(matches!(
+            Request::BlockPlan {
+                kind: "k".into(),
+                state: "{}".into(),
+                operation: "op".into(),
+                input: "{}".into(),
+                reply,
+            },
+            Request::BlockPlan { .. }
+        ));
+
+        let (reply, _rx) = oneshot::channel();
+        assert!(matches!(
+            Request::BlockValidate {
+                kind: "k".into(),
+                state: "{}".into(),
+                reply,
+            },
+            Request::BlockValidate { .. }
+        ));
+
+        let (reply, _rx) = oneshot::channel();
+        assert!(matches!(Request::FormulaDefs { reply }, Request::FormulaDefs { .. }));
+
+        let (reply, _rx) = oneshot::channel();
+        assert!(matches!(
+            Request::FormulaEvaluate {
+                name: "KV_GET".into(),
+                args: "[]".into(),
+                reply,
+            },
+            Request::FormulaEvaluate { .. }
+        ));
+    }
 }

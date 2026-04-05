@@ -143,4 +143,44 @@ mod tests {
         drop(provider);
         assert!(rx.is_closed(), "channel should close once all clones drop");
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn block_provider_send_error_maps_to_extension_crashed() {
+        // Drop the receiver before issuing requests: every send fails, every
+        // call must surface ExtensionCrashed. This exercises the error
+        // propagation path without a live worker.
+        let (tx, rx) = mpsc::unbounded_channel::<Request>();
+        drop(rx);
+        let provider = Provider::new(tx);
+
+        let err = provider.types().await.expect_err("types should fail");
+        assert!(
+            matches!(err, Error::ExtensionCrashed),
+            "types: expected ExtensionCrashed, got: {err:?}"
+        );
+
+        let err = provider
+            .create("k", serde_json::json!({}))
+            .await
+            .expect_err("create should fail");
+        assert!(
+            matches!(err, Error::ExtensionCrashed),
+            "create: expected ExtensionCrashed, got: {err:?}"
+        );
+
+        let err = provider
+            .plan("k", "{}", "op", serde_json::json!({}))
+            .await
+            .expect_err("plan should fail");
+        assert!(
+            matches!(err, Error::ExtensionCrashed),
+            "plan: expected ExtensionCrashed, got: {err:?}"
+        );
+
+        let err = provider.validate("k", "{}").await.expect_err("validate should fail");
+        assert!(
+            matches!(err, Error::ExtensionCrashed),
+            "validate: expected ExtensionCrashed, got: {err:?}"
+        );
+    }
 }

@@ -6,8 +6,8 @@
 
 use std::time::Duration;
 
-use emporium::Extension;
 use emporium::host_data::DataRegistry;
+use emporium::{Error, Extension};
 use emporium_core::{column, event, plan, tool};
 use serde_json::json;
 
@@ -440,4 +440,221 @@ async fn host_data_cursor_empty_resource_yields_empty_frequencies() {
     };
 
     assert_eq!(freq_json, "{}", "empty resource should produce empty frequency map");
+}
+
+// -----------------------------------------------------------------------------
+// Error-case coverage: every typed call has an error path. These tests assert
+// that extension-side failures surface as the correct host-side Error variant.
+// -----------------------------------------------------------------------------
+
+#[tokio::test(flavor = "current_thread")]
+async fn execute_tool_with_unknown_name_returns_extension_error() {
+    let ext = Extension::load(KV_EXTENSION_PATH, json!({}))
+        .await
+        .expect("load extension");
+
+    let err = ext
+        .execute_tool("nonexistent_tool", json!({}))
+        .await
+        .expect_err("unknown tool must fail");
+    match err {
+        Error::ExtensionError(msg) => {
+            assert!(
+                msg.contains("Unknown tool: nonexistent_tool"),
+                "expected 'Unknown tool: nonexistent_tool' in message, got: {msg}"
+            );
+        }
+        other => panic!("expected ExtensionError, got: {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn execute_tool_with_missing_required_param_returns_extension_error() {
+    let ext = Extension::load(KV_EXTENSION_PATH, json!({}))
+        .await
+        .expect("load extension");
+
+    let err = ext
+        .execute_tool("get", json!({}))
+        .await
+        .expect_err("missing 'key' must fail");
+    match err {
+        Error::ExtensionError(msg) => {
+            assert!(
+                msg.contains("Missing 'key' parameter"),
+                "expected 'Missing 'key' parameter' in message, got: {msg}"
+            );
+        }
+        other => panic!("expected ExtensionError, got: {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn execute_tool_with_non_object_params_returns_extension_error() {
+    let ext = Extension::load(KV_EXTENSION_PATH, json!({}))
+        .await
+        .expect("load extension");
+
+    // Host serializes the raw string as JSON before handing it to the
+    // extension; the extension parses it successfully but then rejects the
+    // shape when `require_str` fails to find 'key' on a non-object.
+    let err = ext
+        .execute_tool("get", json!("raw_string"))
+        .await
+        .expect_err("non-object params must fail");
+    assert!(
+        matches!(err, Error::ExtensionError(_)),
+        "expected ExtensionError, got: {err:?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn block_provider_plan_with_unknown_kind_returns_block_operation_error() {
+    let ext = Extension::load(KV_EXTENSION_PATH, json!({}))
+        .await
+        .expect("load extension");
+    let provider = ext.block().expect("block provider should be available");
+
+    let err = provider
+        .plan("unknown-kind", "{}", "anything", json!({}))
+        .await
+        .expect_err("unknown kind must fail");
+    match err {
+        Error::BlockOperation(msg) => {
+            assert!(
+                msg.contains("Unknown block kind"),
+                "expected 'Unknown block kind' in message, got: {msg}"
+            );
+        }
+        other => panic!("expected BlockOperation, got: {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn block_provider_plan_with_unknown_operation_returns_block_operation_error() {
+    let ext = Extension::load(KV_EXTENSION_PATH, json!({}))
+        .await
+        .expect("load extension");
+    let provider = ext.block().expect("block provider should be available");
+
+    let state = provider
+        .create("prefix-tracker", json!({"prefixes": []}))
+        .await
+        .expect("create prefix-tracker block");
+
+    let err = provider
+        .plan("prefix-tracker", &state, "unknown_op", json!({}))
+        .await
+        .expect_err("unknown operation must fail");
+    match err {
+        Error::BlockOperation(msg) => {
+            assert!(
+                msg.contains("Unknown operation"),
+                "expected 'Unknown operation' in message, got: {msg}"
+            );
+        }
+        other => panic!("expected BlockOperation, got: {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn block_provider_create_with_unknown_kind_returns_block_operation_error() {
+    let ext = Extension::load(KV_EXTENSION_PATH, json!({}))
+        .await
+        .expect("load extension");
+    let provider = ext.block().expect("block provider should be available");
+
+    let err = provider
+        .create("nonexistent", json!({}))
+        .await
+        .expect_err("unknown kind must fail");
+    assert!(
+        matches!(err, Error::BlockOperation(_)),
+        "expected BlockOperation, got: {err:?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn block_provider_validate_with_invalid_state_returns_block_operation_error() {
+    let ext = Extension::load(KV_EXTENSION_PATH, json!({}))
+        .await
+        .expect("load extension");
+    let provider = ext.block().expect("block provider should be available");
+
+    let err = provider
+        .validate("prefix-tracker", "not-valid-json")
+        .await
+        .expect_err("invalid state must fail");
+    assert!(
+        matches!(err, Error::BlockOperation(_)),
+        "expected BlockOperation, got: {err:?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn formula_evaluate_with_unknown_name_returns_formula_operation_error() {
+    let ext = Extension::load(KV_EXTENSION_PATH, json!({}))
+        .await
+        .expect("load extension");
+    let provider = ext.formula().expect("formula provider should be available");
+
+    let err = provider
+        .evaluate("NONEXISTENT", json!([]))
+        .await
+        .expect_err("unknown formula must fail");
+    match err {
+        Error::FormulaOperation(msg) => {
+            assert!(
+                msg.contains("Unknown formula"),
+                "expected 'Unknown formula' in message, got: {msg}"
+            );
+        }
+        other => panic!("expected FormulaOperation, got: {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn formula_kv_get_with_missing_arg_returns_formula_operation_error() {
+    let ext = Extension::load(KV_EXTENSION_PATH, json!({}))
+        .await
+        .expect("load extension");
+    let provider = ext.formula().expect("formula provider should be available");
+
+    let err = provider
+        .evaluate("KV_GET", json!([]))
+        .await
+        .expect_err("missing arg must fail");
+    match err {
+        Error::FormulaOperation(msg) => {
+            assert!(
+                msg.contains("expects 1 string argument"),
+                "expected 'expects 1 string argument' in message, got: {msg}"
+            );
+        }
+        other => panic!("expected FormulaOperation, got: {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn extension_load_with_missing_file_returns_io_error() {
+    let err = Extension::load("/nonexistent/path/to.empkg", json!({}))
+        .await
+        .expect_err("missing file must fail");
+    assert!(matches!(err, Error::Io(_)), "expected Io, got: {err:?}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn extension_from_bytes_with_garbage_returns_custom_error() {
+    let err = Extension::from_bytes(b"not a valid empkg archive", json!({}))
+        .await
+        .expect_err("garbage bytes must fail");
+    // extract_package wraps every tar/gzip failure in Error::Custom with
+    // an "Invalid package" prefix.
+    match err {
+        Error::Custom(msg) => assert!(
+            msg.contains("Invalid package"),
+            "expected 'Invalid package' in message, got: {msg}"
+        ),
+        other => panic!("expected Custom, got: {other:?}"),
+    }
 }

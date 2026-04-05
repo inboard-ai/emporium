@@ -110,4 +110,29 @@ mod tests {
         drop(provider);
         assert!(rx.is_closed(), "channel should close once all clones drop");
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn formula_provider_send_error_maps_to_extension_crashed() {
+        // Drop the receiver before issuing requests: every send fails, every
+        // call must surface ExtensionCrashed. This exercises the error
+        // propagation path without a live worker.
+        let (tx, rx) = mpsc::unbounded_channel::<Request>();
+        drop(rx);
+        let provider = Provider::new(tx);
+
+        let err = provider.defs().await.expect_err("defs should fail");
+        assert!(
+            matches!(err, Error::ExtensionCrashed),
+            "defs: expected ExtensionCrashed, got: {err:?}"
+        );
+
+        let err = provider
+            .evaluate("KV_GET", serde_json::json!([]))
+            .await
+            .expect_err("evaluate should fail");
+        assert!(
+            matches!(err, Error::ExtensionCrashed),
+            "evaluate: expected ExtensionCrashed, got: {err:?}"
+        );
+    }
 }
