@@ -16,4 +16,4 @@ wit-bindgen = "0.51"
 
 [package.metadata.component.target]
 path = "wit"
-world = "tool-extension"
+world = "block-extension"

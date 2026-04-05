@@ -1,7 +1,8 @@
 //! Key-Value Store Extension
 //!
 //! A simple in-memory key-value store extension for Emporium. Exports the
-//! `extension` and `tool-provider` interfaces of the `tool-extension` world.
+//! `extension`, `tool-provider`, and `block-provider` interfaces of the
+//! `block-extension` world.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -9,17 +10,23 @@ use std::collections::HashMap;
 use serde_json::{Value, json};
 
 wit_bindgen::generate!({
-    world: "tool-extension",
+    world: "block-extension",
     path: "wit",
 });
 
 use emporium::extensions::host_events::{self, Event, Progress};
+use exports::emporium::extensions::block_provider::{BlockTypeInfo, Guest as BlockProviderGuest, PlanOutcome};
 use exports::emporium::extensions::extension::{Guest as ExtensionGuest, Metadata};
-use exports::emporium::extensions::tool_provider::{Guest as ToolProviderGuest, TextOutput, ToolInfo, ToolOutput};
+use exports::emporium::extensions::tool_provider::{
+    ColumnDef, DataFrameOutput, Guest as ToolProviderGuest, TextOutput, ToolInfo, ToolOutput,
+};
 
 struct Component;
 
 export!(Component);
+
+/// The sole block kind advertised by this extension.
+const PREFIX_TRACKER_KIND: &str = "prefix-tracker";
 
 thread_local! {
     /// Component-level key-value store. WASM is single-threaded per component
@@ -57,6 +64,68 @@ impl ToolProviderGuest for Component {
         notify_progress(&name);
         let parsed: Value = serde_json::from_str(&params).map_err(|err| format!("invalid params JSON: {err}"))?;
         execute_tool(&name, &parsed)
+    }
+}
+
+impl BlockProviderGuest for Component {
+    /// Advertise the block kinds this extension supports. Currently only the
+    /// `prefix-tracker` demo block.
+    fn get_block_types() -> Vec<BlockTypeInfo> {
+        vec![BlockTypeInfo {
+            kind: PREFIX_TRACKER_KIND.to_string(),
+            name: "Prefix Tracker".to_string(),
+            description: "Tracks a set of key prefixes and queries matching keys in the KV store.".to_string(),
+        }]
+    }
+
+    /// Create a new block state from user input. The input is expected to be
+    /// a JSON object of the form `{"prefixes": [...]}`. A missing or null
+    /// `prefixes` field is treated as an empty list.
+    fn create(kind: String, input: String) -> Result<String, String> {
+        require_prefix_tracker(&kind)?;
+        let prefixes = parse_prefix_list(&input)?;
+        serialize_state(&prefixes)
+    }
+
+    /// Plan a block operation. The returned `PlanOutcome` describes the
+    /// host-side effects: either a new state, a query plan, or both.
+    fn plan(kind: String, state: String, operation: String, input: String) -> Result<PlanOutcome, String> {
+        require_prefix_tracker(&kind)?;
+        let mut prefixes = parse_state(&state)?;
+        let input_value = parse_json_object(&input)?;
+
+        match operation.as_str() {
+            "add_prefix" => {
+                let prefix = require_str(&input_value, "prefix")?.to_string();
+                if !prefixes.contains(&prefix) {
+                    prefixes.push(prefix);
+                }
+                Ok(PlanOutcome::StateUpdate(serialize_state(&prefixes)?))
+            }
+            "query" => Ok(PlanOutcome::Query(build_query_plan(&prefixes)?)),
+            "rename_prefix" => {
+                let old = require_str(&input_value, "old")?.to_string();
+                let new = require_str(&input_value, "new")?.to_string();
+                match prefixes.iter().position(|p| p == &old) {
+                    Some(idx) => {
+                        prefixes[idx] = new;
+                        let new_state = serialize_state(&prefixes)?;
+                        let plan = build_query_plan(&prefixes)?;
+                        Ok(PlanOutcome::StateUpdateWithQuery((new_state, plan)))
+                    }
+                    None => Err(format!("prefix not found: {old}")),
+                }
+            }
+            other => Err(format!("Unknown operation: {other}")),
+        }
+    }
+
+    /// Validate a block state. The state must be a JSON object with a
+    /// `prefixes` field that is an array of strings.
+    fn validate(kind: String, state: String) -> Result<(), String> {
+        require_prefix_tracker(&kind)?;
+        let _ = parse_state(&state)?;
+        Ok(())
     }
 }
 
@@ -153,6 +222,18 @@ fn tool_list() -> Vec<ToolInfo> {
             cacheable: false,
             activity: None,
         },
+        ToolInfo {
+            id: "list_keys".to_string(),
+            name: "list_keys".to_string(),
+            description: "List all keys as a single-column DataFrame".to_string(),
+            schema: json!({
+                "type": "object",
+                "properties": {}
+            })
+            .to_string(),
+            cacheable: false,
+            activity: None,
+        },
     ]
 }
 
@@ -207,6 +288,22 @@ fn execute_tool(name: &str, params: &Value) -> Result<ToolOutput, String> {
             };
             Ok(text_output(message))
         }
+        "list_keys" => {
+            let rows = KV.with_borrow(|kv| {
+                let mut keys: Vec<&String> = kv.keys().collect();
+                keys.sort();
+                keys.into_iter().map(|k| json!({ "key": k })).collect::<Vec<_>>()
+            });
+            let rows_json = serde_json::to_string(&rows).map_err(|err| err.to_string())?;
+            Ok(data_frame_output(
+                vec![ColumnDef {
+                    name: "key".to_string(),
+                    alias: "Key".to_string(),
+                    dtype: "string".to_string(),
+                }],
+                rows_json,
+            ))
+        }
         other => Err(format!("Unknown tool: {other}")),
     }
 }
@@ -230,4 +327,88 @@ fn text_output(content: String) -> ToolOutput {
         nickname: None,
         store: None,
     })
+}
+
+/// Wrap a schema + row-oriented JSON string in a `ToolOutput::DataFrameOutput`
+/// with no optional metadata set.
+fn data_frame_output(schema: Vec<ColumnDef>, rows: String) -> ToolOutput {
+    ToolOutput::DataFrameOutput(DataFrameOutput {
+        schema,
+        rows,
+        metadata: None,
+        label: None,
+        source: None,
+        description: None,
+        nickname: None,
+        store: None,
+    })
+}
+
+/// Reject any block kind other than `prefix-tracker`.
+fn require_prefix_tracker(kind: &str) -> Result<(), String> {
+    if kind == PREFIX_TRACKER_KIND {
+        Ok(())
+    } else {
+        Err(format!("Unknown block kind: {kind}"))
+    }
+}
+
+/// Parse a JSON string as an object, returning an error for any other value.
+fn parse_json_object(input: &str) -> Result<Value, String> {
+    let value: Value = serde_json::from_str(input).map_err(|err| format!("invalid JSON: {err}"))?;
+    if !value.is_object() {
+        return Err("expected JSON object".to_string());
+    }
+    Ok(value)
+}
+
+/// Parse a `{"prefixes": [...]}` input object into a `Vec<String>`. An
+/// absent or null `prefixes` field is treated as an empty list.
+fn parse_prefix_list(input: &str) -> Result<Vec<String>, String> {
+    let value = parse_json_object(input)?;
+    match value.get("prefixes") {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| "prefixes must be an array of strings".to_string())
+            })
+            .collect(),
+        Some(_) => Err("prefixes must be an array of strings".to_string()),
+    }
+}
+
+/// Parse a block state JSON string, enforcing the `{"prefixes": [...]}` shape.
+fn parse_state(state: &str) -> Result<Vec<String>, String> {
+    let value = parse_json_object(state).map_err(|err| format!("invalid state: {err}"))?;
+    let prefixes = value
+        .get("prefixes")
+        .ok_or_else(|| "invalid state: missing 'prefixes' field".to_string())?;
+    let array = prefixes
+        .as_array()
+        .ok_or_else(|| "invalid state: 'prefixes' must be an array of strings".to_string())?;
+    array
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| "invalid state: 'prefixes' must be an array of strings".to_string())
+        })
+        .collect()
+}
+
+/// Serialize a prefix list back into the canonical `{"prefixes": [...]}` state JSON.
+fn serialize_state(prefixes: &[String]) -> Result<String, String> {
+    serde_json::to_string(&json!({ "prefixes": prefixes })).map_err(|err| err.to_string())
+}
+
+/// Build the query plan JSON for the current prefix set.
+fn build_query_plan(prefixes: &[String]) -> Result<String, String> {
+    serde_json::to_string(&json!({
+        "resource": "kv-keys",
+        "filter": { "key_starts_with_any": prefixes },
+    }))
+    .map_err(|err| err.to_string())
 }

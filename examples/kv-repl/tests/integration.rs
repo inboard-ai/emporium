@@ -20,9 +20,9 @@ async fn loads_lists_and_executes_kv_tools() {
         .expect("load extension");
 
     let tools = ext.list_tools().await.expect("list_tools");
-    assert_eq!(tools.len(), 6, "kv-extension should advertise 6 tools");
+    assert_eq!(tools.len(), 7, "kv-extension should advertise 7 tools");
     let ids: Vec<&str> = tools.iter().map(|t| t.id.as_str()).collect();
-    for expected in ["get", "set", "delete", "get_all", "clear", "stats"] {
+    for expected in ["get", "set", "delete", "get_all", "clear", "stats", "list_keys"] {
         assert!(ids.contains(&expected), "missing tool: {expected} (got {ids:?})");
     }
 
