@@ -16,7 +16,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::manifest::{Manifest, RawManifest};
 use crate::wasm::{self, Request};
-use crate::{Error, ManifestTool, block};
+use crate::{Error, ManifestTool, block, formula};
 
 /// A loaded extension, ready to receive typed calls.
 ///
@@ -33,6 +33,9 @@ pub struct Extension {
     /// True when the extension exports the `block-provider` interface.
     /// Gates [`Extension::block`](Self::block).
     has_block: bool,
+    /// True when the extension exports the `formula-provider` interface.
+    /// Gates [`Extension::formula`](Self::formula).
+    has_formula: bool,
 }
 
 /// Metadata captured from `extension::get-metadata` during init, kept on the
@@ -74,6 +77,7 @@ impl Extension {
             requests: worker.requests,
             events: worker.events,
             has_block: worker.has_block,
+            has_formula: worker.has_formula,
         })
     }
 
@@ -158,6 +162,14 @@ impl Extension {
     pub fn block(&self) -> Option<block::Provider> {
         self.has_block.then(|| block::Provider::new(self.requests.clone()))
     }
+
+    /// Return a [`formula::Provider`] when the extension was loaded against a
+    /// world that exports `formula-provider`. Returns `None` for worlds that
+    /// do not (tool-extension, block-extension). Each call yields a fresh
+    /// provider sharing the same underlying worker channel — cheap to clone.
+    pub fn formula(&self) -> Option<formula::Provider> {
+        self.has_formula.then(|| formula::Provider::new(self.requests.clone()))
+    }
 }
 
 // Compile-time guarantee: `Extension` must stay `Send + Sync` so host apps
@@ -174,6 +186,7 @@ impl std::fmt::Debug for Extension {
             .field("name", &self.metadata.name)
             .field("version", &self.metadata.version)
             .field("has_block", &self.has_block)
+            .field("has_formula", &self.has_formula)
             .finish()
     }
 }

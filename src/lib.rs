@@ -24,6 +24,7 @@
 pub mod block;
 pub mod error;
 pub mod extension;
+pub mod formula;
 pub mod manifest;
 
 // Internal modules

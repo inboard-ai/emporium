@@ -8,7 +8,7 @@
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
-use emporium_core::{block, event, plan, tool};
+use emporium_core::{block, event, formula, plan, tool};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
@@ -29,6 +29,9 @@ pub(crate) const DEFAULT_WORLD: &str = "tool-extension";
 
 /// World name for the block-extension capability tier.
 pub(crate) const BLOCK_WORLD: &str = "block-extension";
+
+/// World name for the rich-extension capability tier (block + formula).
+pub(crate) const RICH_WORLD: &str = "rich-extension";
 
 /// Broadcast capacity for the host-events channel, per MAP_PLAN.
 const EVENT_CAPACITY: usize = 256;
@@ -70,6 +73,26 @@ pub(crate) mod block_bindings {
 use block_bindings::BlockExtension;
 use block_bindings::emporium::extensions::host_events as wit_host_events_block;
 
+/// wasmtime bindings for the `rich-extension` world.
+///
+/// Bindgen produces `RichExtension`, `RichExtensionPre`, the host-events
+/// `Host` trait, and the `exports::emporium::extensions::*` type records —
+/// including the formula-provider types that neither `tool_bindings` nor
+/// `block_bindings` contain. Like those other modules, the shared types are
+/// regenerated here as DISTINCT Rust types from their counterparts.
+#[allow(clippy::all)]
+pub(crate) mod rich_bindings {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "rich-extension",
+        imports: { default: async },
+        exports: { default: async },
+    });
+}
+
+use rich_bindings::RichExtension;
+use rich_bindings::emporium::extensions::host_events as wit_host_events_rich;
+
 /// Handle returned from [`spawn_worker`]: gives the caller the means to send
 /// requests and subscribe to events. The worker thread keeps running as long
 /// as any clone of `requests` survives.
@@ -84,6 +107,9 @@ pub(crate) struct Worker {
     /// True when the extension was loaded against a world that exports
     /// `block-provider`. Gates [`Extension::block`](crate::Extension::block).
     pub(crate) has_block: bool,
+    /// True when the extension was loaded against a world that exports
+    /// `formula-provider`. Gates [`Extension::formula`](crate::Extension::formula).
+    pub(crate) has_formula: bool,
 }
 
 /// Metadata captured from `extension::get-metadata` at init, in a
@@ -122,17 +148,30 @@ impl From<block_bindings::exports::emporium::extensions::extension::Metadata> fo
     }
 }
 
+impl From<rich_bindings::exports::emporium::extensions::extension::Metadata> for WorkerMetadata {
+    fn from(m: rich_bindings::exports::emporium::extensions::extension::Metadata) -> Self {
+        WorkerMetadata {
+            id: m.id,
+            name: m.name,
+            version: m.version,
+            description: m.description,
+        }
+    }
+}
+
 /// A single typed request dispatched to the worker thread.
 ///
 /// Every variant embeds an `oneshot::Sender` for its reply. Dropping the
 /// sender signals the caller that the worker has crashed.
 ///
 /// The `Tool*` / `View` variants are handled by every world; `Block*`
-/// variants are only handled by the block-extension worker. A tool-extension
-/// worker receiving a `Block*` variant replies with
+/// variants are only handled by block-capable workers (block + rich);
+/// `Formula*` variants are only handled by the rich-extension worker. A
+/// worker receiving a variant its world does not cover replies with
 /// [`Error::UnsupportedWorld`] — this is a defensive guard; in practice
-/// [`Extension::block`](crate::Extension::block) only hands out a provider
-/// when the worker was loaded against the block-extension world.
+/// [`Extension::block`](crate::Extension::block) and
+/// [`Extension::formula`](crate::Extension::formula) only hand out providers
+/// when the worker was loaded against a world that exports them.
 #[non_exhaustive]
 pub(crate) enum Request {
     /// Request the current list of tools.
@@ -191,6 +230,20 @@ pub(crate) enum Request {
         /// Channel used to deliver the reply.
         reply: oneshot::Sender<Result<(), Error>>,
     },
+    /// Request the current list of formula definitions.
+    FormulaDefs {
+        /// Channel used to deliver the reply.
+        reply: oneshot::Sender<Result<Vec<formula::Def>, Error>>,
+    },
+    /// Evaluate a named formula.
+    FormulaEvaluate {
+        /// Formula name (matches `formula::Def.name`).
+        name: String,
+        /// JSON-encoded args (typically a JSON array of positional arguments).
+        args: String,
+        /// JSON-encoded result (whatever shape the formula returns).
+        reply: oneshot::Sender<Result<String, Error>>,
+    },
 }
 
 /// Per-store state for wasmtime: WASI context, HTTP context, a resource
@@ -238,6 +291,14 @@ impl wit_host_events_block::Host for State {
     }
 }
 
+impl wit_host_events_rich::Host for State {
+    async fn notify(&mut self, event: wit_host_events_rich::Event) {
+        let core_event: event::Event = event.into();
+        tracing::info!(?core_event, "host-events: received notify from extension");
+        let _ = self.events.send(core_event);
+    }
+}
+
 /// Helper used by bindgen's `add_to_linker` — projects `&mut State` into the
 /// host-events handler's associated `Data<'a>` type.
 struct HostEventsData;
@@ -262,6 +323,7 @@ pub(crate) async fn spawn_worker(
     let route = match world.as_str() {
         DEFAULT_WORLD => WorkerRoute::Tool,
         BLOCK_WORLD => WorkerRoute::Block,
+        RICH_WORLD => WorkerRoute::Rich,
         other => return Err(Error::UnsupportedWorld(other.to_string())),
     };
 
@@ -288,6 +350,9 @@ pub(crate) async fn spawn_worker(
                     WorkerRoute::Block => {
                         runtime.block_on(run_block_worker(wasm_bytes, config, event_tx_thread, meta_tx, req_rx))
                     }
+                    WorkerRoute::Rich => {
+                        runtime.block_on(run_rich_worker(wasm_bytes, config, event_tx_thread, meta_tx, req_rx))
+                    }
                 }
             }));
             if let Err(payload) = outcome {
@@ -306,7 +371,8 @@ pub(crate) async fn spawn_worker(
         requests: req_tx,
         events: event_tx,
         metadata: bootstrap.metadata,
-        has_block: matches!(route, WorkerRoute::Block),
+        has_block: matches!(route, WorkerRoute::Block | WorkerRoute::Rich),
+        has_formula: matches!(route, WorkerRoute::Rich),
     })
 }
 
@@ -317,6 +383,8 @@ enum WorkerRoute {
     Tool,
     /// `block-extension` world — adds block-provider on top.
     Block,
+    /// `rich-extension` world — adds formula-provider on top of block.
+    Rich,
 }
 
 /// Internal payload delivered through the meta oneshot on successful init.
@@ -398,6 +466,41 @@ async fn run_block_worker(
     }
 }
 
+/// The async body that runs the `rich-extension` world worker.
+async fn run_rich_worker(
+    wasm_bytes: Vec<u8>,
+    config: String,
+    event_tx: broadcast::Sender<event::Event>,
+    meta_tx: oneshot::Sender<Result<WorkerBootstrap, Error>>,
+    mut req_rx: mpsc::UnboundedReceiver<Request>,
+) {
+    let init = match initialize_rich(wasm_bytes, config, event_tx).await {
+        Ok(ok) => ok,
+        Err(err) => {
+            let _ = meta_tx.send(Err(err));
+            return;
+        }
+    };
+    let InitializedRich {
+        bindings,
+        mut store,
+        metadata,
+    } = init;
+
+    if meta_tx
+        .send(Ok(WorkerBootstrap {
+            metadata: metadata.into(),
+        }))
+        .is_err()
+    {
+        return;
+    }
+
+    while let Some(request) = req_rx.recv().await {
+        handle_rich_request(request, &bindings, &mut store).await;
+    }
+}
+
 /// Output of the tool-extension initialization phase.
 struct InitializedTool {
     bindings: ToolExtension,
@@ -410,6 +513,13 @@ struct InitializedBlock {
     bindings: BlockExtension,
     store: Store<State>,
     metadata: block_bindings::exports::emporium::extensions::extension::Metadata,
+}
+
+/// Output of the rich-extension initialization phase.
+struct InitializedRich {
+    bindings: RichExtension,
+    store: Store<State>,
+    metadata: rich_bindings::exports::emporium::extensions::extension::Metadata,
 }
 
 /// Compile, instantiate, `init`, and capture metadata for tool-extension.
@@ -467,6 +577,33 @@ async fn initialize_block(
     })
 }
 
+/// Compile, instantiate, `init`, and capture metadata for rich-extension.
+async fn initialize_rich(
+    wasm_bytes: Vec<u8>,
+    config: String,
+    event_tx: broadcast::Sender<event::Event>,
+) -> Result<InitializedRich, Error> {
+    let (engine, component, mut store) = prepare_component(&wasm_bytes, event_tx)?;
+
+    validate_world_exports(RICH_WORLD, &engine, &component)?;
+
+    let linker = build_rich_linker(&engine)?;
+    let bindings = RichExtension::instantiate_async(&mut store, &component, &linker).await?;
+
+    let ext_guest = bindings.emporium_extensions_extension();
+    let metadata = ext_guest.call_get_metadata(&mut store).await?;
+    let init_result = ext_guest.call_init(&mut store, &config).await?;
+    if let Err(msg) = init_result {
+        return Err(Error::ExtensionLoadError(msg));
+    }
+
+    Ok(InitializedRich {
+        bindings,
+        store,
+        metadata,
+    })
+}
+
 /// Compile the component and build the wasmtime store with shared WASI/HTTP
 /// + host-events context. Used by both world-specific initialization paths.
 fn prepare_component(
@@ -503,6 +640,13 @@ fn build_block_linker(engine: &Engine) -> Result<Linker<State>, Error> {
     Ok(linker)
 }
 
+/// Register WASI, WASI-HTTP, and the host-events interface for rich-extension.
+fn build_rich_linker(engine: &Engine) -> Result<Linker<State>, Error> {
+    let mut linker = build_base_linker(engine)?;
+    RichExtension::add_to_linker::<State, HostEventsData>(&mut linker, |s| s)?;
+    Ok(linker)
+}
+
 /// Base linker shared by all worlds: WASI + WASI-HTTP. Each world-specific
 /// linker is built on top.
 fn build_base_linker(engine: &Engine) -> Result<Linker<State>, Error> {
@@ -516,14 +660,16 @@ fn build_base_linker(engine: &Engine) -> Result<Linker<State>, Error> {
 /// exactly the required interface set for the world, versioned at
 /// [`WIT_VERSION`], and nothing else.
 ///
-/// | World             | Required exports                               |
-/// |-------------------|------------------------------------------------|
-/// | `tool-extension`  | `extension`, `tool-provider`                   |
-/// | `block-extension` | `extension`, `tool-provider`, `block-provider` |
+/// | World             | Required exports                                                     |
+/// |-------------------|----------------------------------------------------------------------|
+/// | `tool-extension`  | `extension`, `tool-provider`                                         |
+/// | `block-extension` | `extension`, `tool-provider`, `block-provider`                       |
+/// | `rich-extension`  | `extension`, `tool-provider`, `block-provider`, `formula-provider`   |
 fn validate_world_exports(declared: &str, engine: &Engine, component: &Component) -> Result<(), Error> {
     let required_names: &[&str] = match declared {
         DEFAULT_WORLD => &["extension", "tool-provider"],
         BLOCK_WORLD => &["extension", "tool-provider", "block-provider"],
+        RICH_WORLD => &["extension", "tool-provider", "block-provider", "formula-provider"],
         other => return Err(Error::UnsupportedWorld(other.to_string())),
     };
 
@@ -595,10 +741,21 @@ async fn handle_tool_request(request: Request, bindings: &ToolExtension, store: 
         Request::BlockValidate { reply, .. } => {
             let _ = reply.send(Err(Error::UnsupportedWorld(DEFAULT_WORLD.to_string())));
         }
+        Request::FormulaDefs { reply } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(DEFAULT_WORLD.to_string())));
+        }
+        Request::FormulaEvaluate { reply, .. } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(DEFAULT_WORLD.to_string())));
+        }
     }
 }
 
 /// Dispatch a single typed [`Request`] against the block-extension bindings.
+///
+/// `Formula*` variants should not arrive here —
+/// [`Extension::formula`](crate::Extension::formula) only hands out providers
+/// when the worker is formula-capable. If one does arrive (caller bug), the
+/// reply surfaces [`Error::UnsupportedWorld`].
 async fn handle_block_request(request: Request, bindings: &BlockExtension, store: &mut Store<State>) {
     match request {
         Request::ListTools { reply } => {
@@ -633,6 +790,61 @@ async fn handle_block_request(request: Request, bindings: &BlockExtension, store
         }
         Request::BlockValidate { kind, state, reply } => {
             let outcome = block_validate(bindings, store, &kind, &state).await;
+            let _ = reply.send(outcome);
+        }
+        Request::FormulaDefs { reply } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(BLOCK_WORLD.to_string())));
+        }
+        Request::FormulaEvaluate { reply, .. } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(BLOCK_WORLD.to_string())));
+        }
+    }
+}
+
+/// Dispatch a single typed [`Request`] against the rich-extension bindings.
+/// Handles every variant: Tool*, View, Block*, and Formula*.
+async fn handle_rich_request(request: Request, bindings: &RichExtension, store: &mut Store<State>) {
+    match request {
+        Request::ListTools { reply } => {
+            let outcome = rich_list_tools(bindings, store).await;
+            let _ = reply.send(outcome);
+        }
+        Request::ExecuteTool { name, params, reply } => {
+            let outcome = rich_execute_tool(bindings, store, &name, &params).await;
+            let _ = reply.send(outcome);
+        }
+        Request::View { reply } => {
+            let outcome = rich_view(bindings, store).await;
+            let _ = reply.send(outcome);
+        }
+        Request::BlockTypes { reply } => {
+            let outcome = rich_block_types(bindings, store).await;
+            let _ = reply.send(outcome);
+        }
+        Request::BlockCreate { kind, input, reply } => {
+            let outcome = rich_block_create(bindings, store, &kind, &input).await;
+            let _ = reply.send(outcome);
+        }
+        Request::BlockPlan {
+            kind,
+            state,
+            operation,
+            input,
+            reply,
+        } => {
+            let outcome = rich_block_plan(bindings, store, &kind, &state, &operation, &input).await;
+            let _ = reply.send(outcome);
+        }
+        Request::BlockValidate { kind, state, reply } => {
+            let outcome = rich_block_validate(bindings, store, &kind, &state).await;
+            let _ = reply.send(outcome);
+        }
+        Request::FormulaDefs { reply } => {
+            let outcome = rich_formula_defs(bindings, store).await;
+            let _ = reply.send(outcome);
+        }
+        Request::FormulaEvaluate { name, args, reply } => {
+            let outcome = rich_formula_evaluate(bindings, store, &name, &args).await;
             let _ = reply.send(outcome);
         }
     }
@@ -732,6 +944,95 @@ async fn block_validate(
     let guest = bindings.emporium_extensions_block_provider();
     let wit_outcome = guest.call_validate(&mut *store, kind, state).await?;
     wit_outcome.map_err(Error::BlockOperation)
+}
+
+async fn rich_list_tools(bindings: &RichExtension, store: &mut Store<State>) -> Result<Vec<tool::Info>, Error> {
+    let guest = bindings.emporium_extensions_tool_provider();
+    let wit_tools = guest.call_list_tools(&mut *store).await?;
+    wit_tools
+        .into_iter()
+        .map(tool::Info::try_from)
+        .collect::<Result<Vec<_>, _>>()
+}
+
+async fn rich_execute_tool(
+    bindings: &RichExtension,
+    store: &mut Store<State>,
+    name: &str,
+    params: &str,
+) -> Result<tool::Output, Error> {
+    let guest = bindings.emporium_extensions_tool_provider();
+    let wit_outcome = guest.call_execute_tool(&mut *store, name, params).await?;
+    let wit_output = wit_outcome.map_err(Error::ExtensionError)?;
+    tool::Output::try_from(wit_output)
+}
+
+async fn rich_view(bindings: &RichExtension, store: &mut Store<State>) -> Result<String, Error> {
+    let guest = bindings.emporium_extensions_extension();
+    let s = guest.call_view(&mut *store).await?;
+    Ok(s)
+}
+
+async fn rich_block_types(bindings: &RichExtension, store: &mut Store<State>) -> Result<Vec<block::TypeInfo>, Error> {
+    let guest = bindings.emporium_extensions_block_provider();
+    let wit_types = guest.call_get_block_types(&mut *store).await?;
+    Ok(wit_types.into_iter().map(block::TypeInfo::from).collect())
+}
+
+async fn rich_block_create(
+    bindings: &RichExtension,
+    store: &mut Store<State>,
+    kind: &str,
+    input: &str,
+) -> Result<String, Error> {
+    let guest = bindings.emporium_extensions_block_provider();
+    let wit_outcome = guest.call_create(&mut *store, kind, input).await?;
+    wit_outcome.map_err(Error::BlockOperation)
+}
+
+async fn rich_block_plan(
+    bindings: &RichExtension,
+    store: &mut Store<State>,
+    kind: &str,
+    state: &str,
+    operation: &str,
+    input: &str,
+) -> Result<plan::Outcome, Error> {
+    let guest = bindings.emporium_extensions_block_provider();
+    let wit_outcome = guest.call_plan(&mut *store, kind, state, operation, input).await?;
+    let wit_plan = wit_outcome.map_err(Error::BlockOperation)?;
+    Ok(plan::Outcome::from(wit_plan))
+}
+
+async fn rich_block_validate(
+    bindings: &RichExtension,
+    store: &mut Store<State>,
+    kind: &str,
+    state: &str,
+) -> Result<(), Error> {
+    let guest = bindings.emporium_extensions_block_provider();
+    let wit_outcome = guest.call_validate(&mut *store, kind, state).await?;
+    wit_outcome.map_err(Error::BlockOperation)
+}
+
+async fn rich_formula_defs(bindings: &RichExtension, store: &mut Store<State>) -> Result<Vec<formula::Def>, Error> {
+    let guest = bindings.emporium_extensions_formula_provider();
+    let wit_defs = guest.call_get_formulas(&mut *store).await?;
+    wit_defs
+        .into_iter()
+        .map(formula::Def::try_from)
+        .collect::<Result<Vec<_>, _>>()
+}
+
+async fn rich_formula_evaluate(
+    bindings: &RichExtension,
+    store: &mut Store<State>,
+    name: &str,
+    args: &str,
+) -> Result<String, Error> {
+    let guest = bindings.emporium_extensions_formula_provider();
+    let wit_outcome = guest.call_evaluate(&mut *store, name, args).await?;
+    wit_outcome.map_err(Error::FormulaOperation)
 }
 
 // Conversions from wasmtime-bindgen types to canonical core types live in
@@ -921,5 +1222,54 @@ mod tests {
             }
             other => panic!("unexpected outcome: {other:?}"),
         }
+    }
+
+    #[test]
+    fn from_formula_def_round_trip() {
+        use rich_bindings::exports::emporium::extensions::formula_provider as wit_formula_provider_rich;
+
+        let schema_json = r#"{"type":"object","properties":{"key":{"type":"string"}},"required":["key"]}"#;
+        let wit = wit_formula_provider_rich::FormulaDef {
+            name: "KV_GET".into(),
+            description: "Read a value by key".into(),
+            schema: schema_json.into(),
+        };
+
+        let def = formula::Def::try_from(wit).unwrap();
+        assert_eq!(def.name, "KV_GET");
+        assert_eq!(def.description, "Read a value by key");
+        assert_eq!(
+            def.schema,
+            serde_json::from_str::<serde_json::Value>(schema_json).unwrap()
+        );
+    }
+
+    #[test]
+    fn from_formula_def_empty_schema_yields_null() {
+        use rich_bindings::exports::emporium::extensions::formula_provider as wit_formula_provider_rich;
+
+        let wit = wit_formula_provider_rich::FormulaDef {
+            name: "KV_COUNT".into(),
+            description: "".into(),
+            schema: "".into(),
+        };
+        let def = formula::Def::try_from(wit).unwrap();
+        assert_eq!(def.name, "KV_COUNT");
+        assert_eq!(def.schema, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn from_block_type_info_round_trip_rich() {
+        use rich_bindings::exports::emporium::extensions::block_provider as wit_block_provider_rich;
+
+        let wit = wit_block_provider_rich::BlockTypeInfo {
+            kind: "prefix-tracker".into(),
+            name: "Prefix Tracker".into(),
+            description: "Tracks key prefixes in the KV store".into(),
+        };
+        let info = block::TypeInfo::from(wit);
+        assert_eq!(info.kind, "prefix-tracker");
+        assert_eq!(info.name, "Prefix Tracker");
+        assert_eq!(info.description, "Tracks key prefixes in the KV store");
     }
 }

@@ -45,6 +45,10 @@ pub enum Error {
     #[error("Block-provider error: {0}")]
     BlockOperation(String),
 
+    /// The extension's formula-provider returned an error from a typed call.
+    #[error("Formula-provider error: {0}")]
+    FormulaOperation(String),
+
     /// The extension manifest was invalid.
     #[error("Manifest error: {0}")]
     ManifestError(ManifestError),
