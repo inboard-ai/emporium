@@ -13,7 +13,7 @@ pub struct Text {
     /// Human-readable description of the invocation (e.g., the SQL query)
     #[serde(default)]
     pub source: Option<String>,
-    /// Per-result cache override — when set, overrides `ToolInfo.cacheable`
+    /// Per-result cache override — when set, overrides `tool::Info.cacheable`.
     #[serde(default)]
     pub store: Option<bool>,
     /// Brief description of what the result contains

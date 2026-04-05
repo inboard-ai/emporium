@@ -1,18 +1,53 @@
-//! Tool result types for the Emporium extension framework
+//! Tool-related domain types: descriptor metadata and labels.
 
-pub mod dataframe;
+pub mod data_frame;
+pub mod output;
 pub mod text;
 
-pub use dataframe::DataFrame;
+pub use data_frame::DataFrame;
+pub use output::Output;
 pub use text::Text;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-/// Label for tool results, displayed in the UI (e.g., "AAPL" for stock data)
+/// Tool metadata exported by an extension.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Info {
+    /// Unique identifier for the tool.
+    pub id: String,
+    /// Human-readable name.
+    pub name: String,
+    /// Description of what the tool does.
+    pub description: String,
+    /// JSON Schema for the tool's parameters.
+    pub schema: Value,
+    /// Whether results from this tool should be cached as project-level resources.
+    #[serde(default)]
+    pub cacheable: bool,
+    /// Optional display hints for live/completed status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<Activity>,
+}
+
+/// Display hints for live/completed status of a tool invocation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Activity {
+    /// Verb shown during execution (e.g. "Querying").
+    pub present: String,
+    /// Verb shown after completion (e.g. "Queried").
+    pub past: String,
+    /// JSON pointer into the tool's input params to extract a display subject.
+    /// Empty string if no subject.
+    pub subject_field: String,
+}
+
+/// Label for tool results, displayed in the UI (e.g., "AAPL" for stock data).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Label(pub String);
 
 impl Label {
+    /// Construct a new label from any string-like value.
     pub fn new<T: Into<String>>(value: T) -> Self {
         Self(value.into())
     }
@@ -21,191 +56,5 @@ impl Label {
 impl<T: Into<String>> From<T> for Label {
     fn from(value: T) -> Self {
         Self(value.into())
-    }
-}
-
-/// Tool execution result with type safety
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ToolResult {
-    /// Text-based result
-    Text(Text),
-    /// Columnar data that can be converted to polars DataFrame on the client
-    DataFrame(DataFrame),
-}
-
-impl ToolResult {
-    /// Create a new text result
-    pub fn text<T: Into<String>>(content: T) -> Self {
-        ToolResult::Text(Text::new(content))
-    }
-
-    /// Create columnar data that can be converted to DataFrame on the client
-    pub fn columnar(data: serde_json::Value, schema: crate::Schema, metadata: Option<serde_json::Value>) -> Self {
-        ToolResult::DataFrame(DataFrame::new(schema, data, metadata))
-    }
-
-    /// Get the label from the result, if any
-    pub fn label(&self) -> Option<&Label> {
-        match self {
-            ToolResult::Text(text) => text.label.as_ref(),
-            ToolResult::DataFrame(df) => df.label.as_ref(),
-        }
-    }
-
-    /// Set a label on the result (chainable)
-    pub fn with_label(self, label: Label) -> Self {
-        match self {
-            ToolResult::Text(mut text) => {
-                text.label = Some(label);
-                ToolResult::Text(text)
-            }
-            ToolResult::DataFrame(mut df) => {
-                df.label = Some(label);
-                ToolResult::DataFrame(df)
-            }
-        }
-    }
-
-    /// Get the source description from the result, if any
-    pub fn source(&self) -> Option<&str> {
-        match self {
-            ToolResult::Text(text) => text.source.as_deref(),
-            ToolResult::DataFrame(df) => df.source.as_deref(),
-        }
-    }
-
-    /// Set a human-readable source description (chainable)
-    pub fn with_source(self, source: impl Into<String>) -> Self {
-        let source = source.into();
-        match self {
-            ToolResult::Text(mut text) => {
-                text.source = Some(source);
-                ToolResult::Text(text)
-            }
-            ToolResult::DataFrame(mut df) => {
-                df.source = Some(source);
-                ToolResult::DataFrame(df)
-            }
-        }
-    }
-
-    /// Get the per-result store override, if any
-    pub fn store(&self) -> Option<bool> {
-        match self {
-            ToolResult::Text(text) => text.store,
-            ToolResult::DataFrame(df) => df.store,
-        }
-    }
-
-    /// Set a per-result store override (chainable)
-    pub fn with_store(self, store: bool) -> Self {
-        match self {
-            ToolResult::Text(mut text) => {
-                text.store = Some(store);
-                ToolResult::Text(text)
-            }
-            ToolResult::DataFrame(mut df) => {
-                df.store = Some(store);
-                ToolResult::DataFrame(df)
-            }
-        }
-    }
-
-    /// Get the description from the result, if any
-    pub fn description(&self) -> Option<&str> {
-        match self {
-            ToolResult::Text(text) => text.description.as_deref(),
-            ToolResult::DataFrame(df) => df.description.as_deref(),
-        }
-    }
-
-    /// Set a brief description (chainable)
-    pub fn with_description(self, description: impl Into<String>) -> Self {
-        let description = description.into();
-        match self {
-            ToolResult::Text(mut text) => {
-                text.description = Some(description);
-                ToolResult::Text(text)
-            }
-            ToolResult::DataFrame(mut df) => {
-                df.description = Some(description);
-                ToolResult::DataFrame(df)
-            }
-        }
-    }
-
-    /// Get the nickname from the result, if any
-    pub fn nickname(&self) -> Option<&str> {
-        match self {
-            ToolResult::Text(text) => text.nickname.as_deref(),
-            ToolResult::DataFrame(df) => df.nickname.as_deref(),
-        }
-    }
-
-    /// Set a short, no-spaces identifier for use in formulas (chainable)
-    pub fn with_nickname(self, nickname: impl Into<String>) -> Self {
-        let nickname = nickname.into();
-        match self {
-            ToolResult::Text(mut text) => {
-                text.nickname = Some(nickname);
-                ToolResult::Text(text)
-            }
-            ToolResult::DataFrame(mut df) => {
-                df.nickname = Some(nickname);
-                ToolResult::DataFrame(df)
-            }
-        }
-    }
-}
-
-impl From<Text> for ToolResult {
-    fn from(text: Text) -> Self {
-        ToolResult::Text(text)
-    }
-}
-
-impl From<DataFrame> for ToolResult {
-    fn from(df: DataFrame) -> Self {
-        ToolResult::DataFrame(df)
-    }
-}
-
-/// Execute a custom tool command, handling JSON parsing and response wrapping
-pub async fn perform<F, Fut, E>(command: String, correlation_id: Option<String>, executor: F) -> crate::Response<E>
-where
-    F: FnOnce(serde_json::Value) -> Fut,
-    Fut: std::future::Future<Output = Result<ToolResult, E>>,
-{
-    let request = match serde_json::from_str::<serde_json::Value>(&command) {
-        Ok(r) => r,
-        Err(_) => {
-            return crate::Response::Error {
-                message: "Invalid JSON in custom command".to_string(),
-                correlation_id,
-            };
-        }
-    };
-
-    let name = match request.get("tool").and_then(|v| v.as_str()) {
-        Some(n) => n.to_string(),
-        None => {
-            return crate::Response::Error {
-                message: "Missing 'tool' field in custom command".to_string(),
-                correlation_id,
-            };
-        }
-    };
-
-    match executor(request).await {
-        Ok(result) => crate::Response::ToolResult {
-            name,
-            result: Ok(result),
-            correlation_id,
-        },
-        Err(e) => crate::Response::ToolResult {
-            name,
-            result: Err(e),
-            correlation_id,
-        },
     }
 }

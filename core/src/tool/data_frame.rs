@@ -1,36 +1,39 @@
-//! DataFrame tool result type
+//! DataFrame tool output type.
 
 use super::Label;
-use crate::{CoreError, Schema};
+use crate::{Error, column};
 use polars_core::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Columnar data that can be converted to polars DataFrame on the client
+/// Columnar data that can be converted to a polars DataFrame on the client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataFrame {
-    pub schema: Schema,
+    /// Schema describing each column.
+    pub schema: Vec<column::Def>,
+    /// Raw row- or column-oriented JSON data.
     pub data: Value,
+    /// Optional free-form metadata attached to the frame.
     pub metadata: Option<Value>,
-    /// Optional label for display (e.g., "AAPL" for stock data)
+    /// Optional label for display (e.g., "AAPL" for stock data).
     pub label: Option<Label>,
-    /// Human-readable description of the invocation (e.g., the SQL query)
+    /// Human-readable description of the invocation (e.g., the SQL query).
     #[serde(default)]
     pub source: Option<String>,
-    /// Per-result cache override — when set, overrides `ToolInfo.cacheable`
+    /// Per-output cache override — when set, overrides `tool::Info.cacheable`.
     #[serde(default)]
     pub store: Option<bool>,
-    /// Brief description of what the result contains
+    /// Brief description of what the output contains.
     #[serde(default)]
     pub description: Option<String>,
-    /// Short, no-spaces identifier for use in formulas (e.g., "combined_ratio")
+    /// Short, no-spaces identifier for use in formulas (e.g., "combined_ratio").
     #[serde(default)]
     pub nickname: Option<String>,
 }
 
 impl DataFrame {
-    /// Create a new DataFrame result
-    pub fn new(schema: Schema, data: Value, metadata: Option<Value>) -> Self {
+    /// Create a new DataFrame output.
+    pub fn new(schema: Vec<column::Def>, data: Value, metadata: Option<Value>) -> Self {
         Self {
             schema,
             data,
@@ -43,8 +46,8 @@ impl DataFrame {
         }
     }
 
-    /// Create a new DataFrame result with a label
-    pub fn with_label(schema: Schema, data: Value, metadata: Option<Value>, label: Label) -> Self {
+    /// Create a new DataFrame output with a label.
+    pub fn with_label(schema: Vec<column::Def>, data: Value, metadata: Option<Value>, label: Label) -> Self {
         Self {
             schema,
             data,
@@ -57,8 +60,8 @@ impl DataFrame {
         }
     }
 
-    /// Convert to polars DataFrame
-    pub fn to_dataframe(self) -> Result<polars_core::frame::DataFrame, CoreError> {
+    /// Convert to a polars DataFrame.
+    pub fn to_dataframe(self) -> Result<polars_core::frame::DataFrame, Error> {
         // Helper to convert string dtype to Polars DataType
         fn to_dtype(dtype: &str) -> DataType {
             match dtype {
@@ -170,7 +173,7 @@ impl DataFrame {
                 }
 
                 polars_core::frame::DataFrame::new(columns_vec)
-                    .map_err(|e| CoreError::DataFrameError(format!("Failed to create DataFrame: {}", e)))
+                    .map_err(|e| Error::DataFrame(format!("Failed to create DataFrame: {}", e)))
             }
 
             Value::Object(obj) => {
@@ -300,12 +303,12 @@ impl DataFrame {
                 }
 
                 polars_core::frame::DataFrame::new(columns_vec)
-                    .map_err(|e| CoreError::DataFrameError(format!("Failed to create DataFrame: {}", e)))
+                    .map_err(|e| Error::DataFrame(format!("Failed to create DataFrame: {}", e)))
             }
 
             Value::Null => Ok(polars_core::frame::DataFrame::empty()),
 
-            _ => Err(CoreError::DataFrameError(
+            _ => Err(Error::DataFrame(
                 "Data must be an array or object to convert to DataFrame".to_string(),
             )),
         }
