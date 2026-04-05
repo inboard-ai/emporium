@@ -20,13 +20,15 @@
 //!   block-add <prefix>            - Add a prefix to the current block state
 //!   block-rename <old> <new>      - Rename a prefix and re-query matching keys
 //!   block-query                   - Run the current block's query plan
+//!   formulas                      - List formulas advertised by the extension
+//!   formula <name> [args...]      - Evaluate a formula with positional args
 //!   help                          - Print this help message
 //!   quit                          - Exit the REPL
 
 use std::io::{self, BufRead, Write};
 use std::time::Duration;
 
-use emporium::{Extension, block};
+use emporium::{Extension, block, formula};
 use emporium_core::{plan, tool};
 use serde_json::json;
 use tokio::sync::broadcast::error::RecvError;
@@ -57,12 +59,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "Commands: get <key>, set <key> <value>, delete <key>, list, clear, stats, tools, view,\n\
          block-types, block-create <prefix>..., block-add <prefix>, block-rename <old> <new>,\n\
-         block-query, help, quit\n"
+         block-query, formulas, formula <name> [args...], help, quit\n"
     );
 
     // Bind the block provider once. The kv-extension advertises the
     // `block-extension` world, so this should always be `Some` at startup.
     let block_provider = ext.block().ok_or("extension does not export a block provider")?;
+
+    // Bind the formula provider once. The kv-extension advertises the
+    // `rich-extension` world, so this should always be `Some` at startup.
+    let formula_provider = ext.formula().ok_or("extension does not export a formula provider")?;
 
     // Drain the host-events broadcast stream in the background so users can
     // see progress events emitted by the extension.
@@ -164,6 +170,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 block_rename(&ext, &block_provider, parts[1], new, &mut block_state).await;
             }
             "block-query" => block_query(&ext, &block_provider, &block_state).await,
+            "formulas" => list_formulas(&formula_provider).await,
+            "formula" => {
+                // Collect the formula name plus any positional arguments, all
+                // whitespace-separated after the command.
+                let mut tokens = line.split_whitespace().skip(1);
+                let Some(name) = tokens.next() else {
+                    println!("Usage: formula <name> [args...]");
+                    continue;
+                };
+                let args: Vec<String> = tokens.map(str::to_string).collect();
+                evaluate_formula(&formula_provider, name, &args).await;
+            }
             "help" | "?" => {
                 println!("Commands:");
                 println!("  get <key>                     - Get a value");
@@ -179,6 +197,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  block-add <prefix>            - Add a prefix to the current block state");
                 println!("  block-rename <old> <new>      - Rename a prefix and re-query matching keys");
                 println!("  block-query                   - Run the current block's query plan");
+                println!("  formulas                      - List formulas advertised by the extension");
+                println!("  formula <name> [args...]      - Evaluate a formula with positional args");
                 println!("  quit                          - Exit the REPL");
             }
             _ => {
@@ -435,5 +455,30 @@ async fn run_toy_plan(ext: &Extension, plan_json: &str) {
         for key in matches {
             println!("{key}");
         }
+    }
+}
+
+/// List the formulas the extension advertises, printing each as
+/// `"{name}: {description}"`.
+async fn list_formulas(provider: &formula::Provider) {
+    match provider.defs().await {
+        Ok(defs) if defs.is_empty() => println!("(no formulas)"),
+        Ok(defs) => {
+            println!("Formulas:");
+            for def in defs {
+                println!("  {}: {}", def.name, def.description);
+            }
+        }
+        Err(err) => println!("Error listing formulas: {err}"),
+    }
+}
+
+/// Evaluate a named formula with positional string arguments. The returned
+/// JSON-encoded result is printed literally (no quote stripping).
+async fn evaluate_formula(provider: &formula::Provider, name: &str, args: &[String]) {
+    let args_value = json!(args);
+    match provider.evaluate(name, args_value).await {
+        Ok(result) => println!("{result}"),
+        Err(err) => println!("Error evaluating formula: {err}"),
     }
 }

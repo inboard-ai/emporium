@@ -226,3 +226,102 @@ async fn block_rename_prefix_returns_state_update_with_query() {
     let filter_strs: Vec<&str> = filter_prefixes.iter().filter_map(|v| v.as_str()).collect();
     assert_eq!(filter_strs, vec!["baz", "bar"]);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn formula_provider_lists_three_formulas() {
+    let ext = Extension::load(KV_EXTENSION_PATH, json!({}))
+        .await
+        .expect("load extension");
+
+    let provider = ext.formula().expect("formula provider should be available");
+    let defs = provider.defs().await.expect("list formula defs");
+
+    assert_eq!(defs.len(), 3, "expected exactly 3 formulas, got {defs:?}");
+    let mut names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, vec!["KV_COUNT", "KV_EXISTS", "KV_GET"]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn formula_kv_count_returns_number() {
+    let ext = Extension::load(KV_EXTENSION_PATH, json!({}))
+        .await
+        .expect("load extension");
+
+    let provider = ext.formula().expect("formula provider should be available");
+
+    let result = provider
+        .evaluate("KV_COUNT", json!([]))
+        .await
+        .expect("evaluate KV_COUNT on empty store");
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect("parse KV_COUNT result");
+    assert_eq!(parsed, json!(0));
+
+    ext.execute_tool("set", json!({"key": "a", "value": "1"}))
+        .await
+        .expect("set a");
+    ext.execute_tool("set", json!({"key": "b", "value": "2"}))
+        .await
+        .expect("set b");
+
+    let result = provider
+        .evaluate("KV_COUNT", json!([]))
+        .await
+        .expect("evaluate KV_COUNT after seeding");
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect("parse KV_COUNT result");
+    assert_eq!(parsed, json!(2));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn formula_kv_get_returns_value_or_null() {
+    let ext = Extension::load(KV_EXTENSION_PATH, json!({}))
+        .await
+        .expect("load extension");
+
+    ext.execute_tool("set", json!({"key": "alpha", "value": "first"}))
+        .await
+        .expect("set alpha");
+
+    let provider = ext.formula().expect("formula provider should be available");
+
+    let result = provider
+        .evaluate("KV_GET", json!(["alpha"]))
+        .await
+        .expect("evaluate KV_GET alpha");
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect("parse KV_GET result");
+    assert_eq!(parsed, json!("first"));
+
+    let result = provider
+        .evaluate("KV_GET", json!(["missing"]))
+        .await
+        .expect("evaluate KV_GET missing");
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect("parse KV_GET result");
+    assert!(parsed.is_null(), "expected JSON null, got {parsed:?}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn formula_kv_exists_returns_boolean() {
+    let ext = Extension::load(KV_EXTENSION_PATH, json!({}))
+        .await
+        .expect("load extension");
+
+    ext.execute_tool("set", json!({"key": "alpha", "value": "v"}))
+        .await
+        .expect("set alpha");
+
+    let provider = ext.formula().expect("formula provider should be available");
+
+    let result = provider
+        .evaluate("KV_EXISTS", json!(["alpha"]))
+        .await
+        .expect("evaluate KV_EXISTS alpha");
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect("parse KV_EXISTS result");
+    assert_eq!(parsed, json!(true));
+
+    let result = provider
+        .evaluate("KV_EXISTS", json!(["missing"]))
+        .await
+        .expect("evaluate KV_EXISTS missing");
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect("parse KV_EXISTS result");
+    assert_eq!(parsed, json!(false));
+}
