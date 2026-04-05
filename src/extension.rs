@@ -16,7 +16,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::manifest::{Manifest, RawManifest};
 use crate::wasm::{self, Request};
-use crate::{Error, ManifestTool};
+use crate::{Error, ManifestTool, block};
 
 /// A loaded extension, ready to receive typed calls.
 ///
@@ -30,6 +30,9 @@ pub struct Extension {
     metadata: CachedMetadata,
     requests: mpsc::UnboundedSender<Request>,
     events: broadcast::Sender<event::Event>,
+    /// True when the extension exports the `block-provider` interface.
+    /// Gates [`Extension::block`](Self::block).
+    has_block: bool,
 }
 
 /// Metadata captured from `extension::get-metadata` during init, kept on the
@@ -70,6 +73,7 @@ impl Extension {
             metadata,
             requests: worker.requests,
             events: worker.events,
+            has_block: worker.has_block,
         })
     }
 
@@ -146,6 +150,14 @@ impl Extension {
     pub fn events(&self) -> broadcast::Receiver<event::Event> {
         self.events.subscribe()
     }
+
+    /// Return a [`block::Provider`] when the extension was loaded against a
+    /// world that exports `block-provider`. Returns `None` for
+    /// `tool-extension`-only extensions. Each call yields a fresh provider
+    /// sharing the same underlying worker channel — cheap to clone.
+    pub fn block(&self) -> Option<block::Provider> {
+        self.has_block.then(|| block::Provider::new(self.requests.clone()))
+    }
 }
 
 // Compile-time guarantee: `Extension` must stay `Send + Sync` so host apps
@@ -161,6 +173,7 @@ impl std::fmt::Debug for Extension {
             .field("id", &self.metadata.id)
             .field("name", &self.metadata.name)
             .field("version", &self.metadata.version)
+            .field("has_block", &self.has_block)
             .finish()
     }
 }

@@ -21,11 +21,13 @@
 //! # }
 //! ```
 
+pub mod block;
 pub mod error;
 pub mod extension;
 pub mod manifest;
 
 // Internal modules
+mod convert;
 mod wasm;
 
 // Re-exports

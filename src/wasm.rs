@@ -8,7 +8,7 @@
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
-use emporium_core::{column, event, tool};
+use emporium_core::{block, event, plan, tool};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
@@ -26,6 +26,9 @@ pub(crate) const WIT_VERSION: &str = "0.2.0";
 
 /// Default world selected when a manifest does not declare one.
 pub(crate) const DEFAULT_WORLD: &str = "tool-extension";
+
+/// World name for the block-extension capability tier.
+pub(crate) const BLOCK_WORLD: &str = "block-extension";
 
 /// Broadcast capacity for the host-events channel, per MAP_PLAN.
 const EVENT_CAPACITY: usize = 256;
@@ -46,7 +49,26 @@ pub(crate) mod tool_bindings {
 
 use tool_bindings::ToolExtension;
 use tool_bindings::emporium::extensions::host_events as wit_host_events;
-use tool_bindings::exports::emporium::extensions::tool_provider as wit_tool_provider;
+
+/// wasmtime bindings for the `block-extension` world.
+///
+/// Bindgen produces `BlockExtension`, `BlockExtensionPre`, the host-events
+/// `Host` trait, and the `exports::emporium::extensions::*` type records —
+/// including the block-provider types that `tool_bindings` does not contain.
+/// The shared types (`Metadata`, `ToolInfo`, etc.) are regenerated here as
+/// DISTINCT Rust types from their `tool_bindings` counterparts.
+#[allow(clippy::all)]
+pub(crate) mod block_bindings {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "block-extension",
+        imports: { default: async },
+        exports: { default: async },
+    });
+}
+
+use block_bindings::BlockExtension;
+use block_bindings::emporium::extensions::host_events as wit_host_events_block;
 
 /// Handle returned from [`spawn_worker`]: gives the caller the means to send
 /// requests and subscribe to events. The worker thread keeps running as long
@@ -56,14 +78,62 @@ pub(crate) struct Worker {
     pub(crate) requests: mpsc::UnboundedSender<Request>,
     /// Broadcast sender for host-events notifications.
     pub(crate) events: broadcast::Sender<event::Event>,
-    /// Cached metadata captured during `extension::init`.
-    pub(crate) metadata: tool_bindings::exports::emporium::extensions::extension::Metadata,
+    /// Cached metadata captured during `extension::init`. Canonical core type
+    /// so the extension crate need not care which bindings module produced it.
+    pub(crate) metadata: WorkerMetadata,
+    /// True when the extension was loaded against a world that exports
+    /// `block-provider`. Gates [`Extension::block`](crate::Extension::block).
+    pub(crate) has_block: bool,
+}
+
+/// Metadata captured from `extension::get-metadata` at init, in a
+/// bindings-independent form so both worker variants can populate it.
+#[derive(Debug, Clone)]
+pub(crate) struct WorkerMetadata {
+    /// Extension identifier.
+    pub(crate) id: String,
+    /// Human-readable extension name.
+    pub(crate) name: String,
+    /// Version reported by the component itself.
+    pub(crate) version: String,
+    /// Description reported by the component itself.
+    pub(crate) description: String,
+}
+
+impl From<tool_bindings::exports::emporium::extensions::extension::Metadata> for WorkerMetadata {
+    fn from(m: tool_bindings::exports::emporium::extensions::extension::Metadata) -> Self {
+        WorkerMetadata {
+            id: m.id,
+            name: m.name,
+            version: m.version,
+            description: m.description,
+        }
+    }
+}
+
+impl From<block_bindings::exports::emporium::extensions::extension::Metadata> for WorkerMetadata {
+    fn from(m: block_bindings::exports::emporium::extensions::extension::Metadata) -> Self {
+        WorkerMetadata {
+            id: m.id,
+            name: m.name,
+            version: m.version,
+            description: m.description,
+        }
+    }
 }
 
 /// A single typed request dispatched to the worker thread.
 ///
 /// Every variant embeds an `oneshot::Sender` for its reply. Dropping the
 /// sender signals the caller that the worker has crashed.
+///
+/// The `Tool*` / `View` variants are handled by every world; `Block*`
+/// variants are only handled by the block-extension worker. A tool-extension
+/// worker receiving a `Block*` variant replies with
+/// [`Error::UnsupportedWorld`] — this is a defensive guard; in practice
+/// [`Extension::block`](crate::Extension::block) only hands out a provider
+/// when the worker was loaded against the block-extension world.
+#[non_exhaustive]
 pub(crate) enum Request {
     /// Request the current list of tools.
     ListTools {
@@ -83,6 +153,43 @@ pub(crate) enum Request {
     View {
         /// Channel used to deliver the reply.
         reply: oneshot::Sender<Result<String, Error>>,
+    },
+    /// Enumerate the block types this extension exports.
+    BlockTypes {
+        /// Channel used to deliver the reply.
+        reply: oneshot::Sender<Result<Vec<block::TypeInfo>, Error>>,
+    },
+    /// Ask the extension to initialize a new block of `kind` from JSON input
+    /// and return the initial state as a JSON string.
+    BlockCreate {
+        /// Block kind identifier.
+        kind: String,
+        /// JSON-encoded creation parameters.
+        input: String,
+        /// Channel used to deliver the reply.
+        reply: oneshot::Sender<Result<String, Error>>,
+    },
+    /// Run a block operation against existing state; returns the plan outcome.
+    BlockPlan {
+        /// Block kind identifier.
+        kind: String,
+        /// JSON-encoded prior state.
+        state: String,
+        /// Operation name.
+        operation: String,
+        /// JSON-encoded operation parameters.
+        input: String,
+        /// Channel used to deliver the reply.
+        reply: oneshot::Sender<Result<plan::Outcome, Error>>,
+    },
+    /// Ask the extension to validate an encoded block state.
+    BlockValidate {
+        /// Block kind identifier.
+        kind: String,
+        /// JSON-encoded state to validate.
+        state: String,
+        /// Channel used to deliver the reply.
+        reply: oneshot::Sender<Result<(), Error>>,
     },
 }
 
@@ -123,6 +230,14 @@ impl wit_host_events::Host for State {
     }
 }
 
+impl wit_host_events_block::Host for State {
+    async fn notify(&mut self, event: wit_host_events_block::Event) {
+        let core_event: event::Event = event.into();
+        tracing::info!(?core_event, "host-events: received notify from extension");
+        let _ = self.events.send(core_event);
+    }
+}
+
 /// Helper used by bindgen's `add_to_linker` — projects `&mut State` into the
 /// host-events handler's associated `Data<'a>` type.
 struct HostEventsData;
@@ -144,9 +259,11 @@ pub(crate) async fn spawn_worker(
     config: String,
 ) -> Result<Worker, Error> {
     let world = manifest.world().to_string();
-    if world != DEFAULT_WORLD {
-        return Err(Error::UnsupportedWorld(world));
-    }
+    let route = match world.as_str() {
+        DEFAULT_WORLD => WorkerRoute::Tool,
+        BLOCK_WORLD => WorkerRoute::Block,
+        other => return Err(Error::UnsupportedWorld(other.to_string())),
+    };
 
     let (meta_tx, meta_rx) = oneshot::channel::<Result<WorkerBootstrap, Error>>();
     let (req_tx, req_rx) = mpsc::unbounded_channel::<Request>();
@@ -164,7 +281,14 @@ pub(crate) async fn spawn_worker(
                         return;
                     }
                 };
-                runtime.block_on(run_tool_worker(wasm_bytes, config, event_tx_thread, meta_tx, req_rx));
+                match route {
+                    WorkerRoute::Tool => {
+                        runtime.block_on(run_tool_worker(wasm_bytes, config, event_tx_thread, meta_tx, req_rx))
+                    }
+                    WorkerRoute::Block => {
+                        runtime.block_on(run_block_worker(wasm_bytes, config, event_tx_thread, meta_tx, req_rx))
+                    }
+                }
             }));
             if let Err(payload) = outcome {
                 tracing::error!(?payload, "emporium worker panicked");
@@ -182,16 +306,27 @@ pub(crate) async fn spawn_worker(
         requests: req_tx,
         events: event_tx,
         metadata: bootstrap.metadata,
+        has_block: matches!(route, WorkerRoute::Block),
     })
+}
+
+/// World-routing selector used by [`spawn_worker`] to pick a worker body.
+#[derive(Copy, Clone)]
+enum WorkerRoute {
+    /// `tool-extension` world — exports extension + tool-provider.
+    Tool,
+    /// `block-extension` world — adds block-provider on top.
+    Block,
 }
 
 /// Internal payload delivered through the meta oneshot on successful init.
 struct WorkerBootstrap {
-    metadata: tool_bindings::exports::emporium::extensions::extension::Metadata,
+    metadata: WorkerMetadata,
 }
 
 /// The async body that runs entirely on the worker thread's current-thread
-/// tokio runtime. Performs the full bring-up then enters the request loop.
+/// tokio runtime. Performs the full bring-up then enters the request loop
+/// for the `tool-extension` world.
 async fn run_tool_worker(
     wasm_bytes: Vec<u8>,
     config: String,
@@ -200,60 +335,94 @@ async fn run_tool_worker(
     mut req_rx: mpsc::UnboundedReceiver<Request>,
 ) {
     // Fused init sequence: on any failure, send Err through meta_tx and exit.
-    let init = match initialize(wasm_bytes, config, event_tx).await {
+    let init = match initialize_tool(wasm_bytes, config, event_tx).await {
         Ok(ok) => ok,
         Err(err) => {
             let _ = meta_tx.send(Err(err));
             return;
         }
     };
-    let Initialized {
+    let InitializedTool {
         bindings,
         mut store,
         metadata,
     } = init;
 
-    if meta_tx.send(Ok(WorkerBootstrap { metadata })).is_err() {
+    if meta_tx
+        .send(Ok(WorkerBootstrap {
+            metadata: metadata.into(),
+        }))
+        .is_err()
+    {
         // The caller dropped the meta receiver — shut down cleanly.
         return;
     }
 
     while let Some(request) = req_rx.recv().await {
-        handle_request(request, &bindings, &mut store).await;
+        handle_tool_request(request, &bindings, &mut store).await;
     }
 }
 
-/// Output of the initialization phase.
-struct Initialized {
+/// The async body that runs the `block-extension` world worker.
+async fn run_block_worker(
+    wasm_bytes: Vec<u8>,
+    config: String,
+    event_tx: broadcast::Sender<event::Event>,
+    meta_tx: oneshot::Sender<Result<WorkerBootstrap, Error>>,
+    mut req_rx: mpsc::UnboundedReceiver<Request>,
+) {
+    let init = match initialize_block(wasm_bytes, config, event_tx).await {
+        Ok(ok) => ok,
+        Err(err) => {
+            let _ = meta_tx.send(Err(err));
+            return;
+        }
+    };
+    let InitializedBlock {
+        bindings,
+        mut store,
+        metadata,
+    } = init;
+
+    if meta_tx
+        .send(Ok(WorkerBootstrap {
+            metadata: metadata.into(),
+        }))
+        .is_err()
+    {
+        return;
+    }
+
+    while let Some(request) = req_rx.recv().await {
+        handle_block_request(request, &bindings, &mut store).await;
+    }
+}
+
+/// Output of the tool-extension initialization phase.
+struct InitializedTool {
     bindings: ToolExtension,
     store: Store<State>,
     metadata: tool_bindings::exports::emporium::extensions::extension::Metadata,
 }
 
-/// Compile, instantiate, `init`, and capture metadata.
-async fn initialize(
+/// Output of the block-extension initialization phase.
+struct InitializedBlock {
+    bindings: BlockExtension,
+    store: Store<State>,
+    metadata: block_bindings::exports::emporium::extensions::extension::Metadata,
+}
+
+/// Compile, instantiate, `init`, and capture metadata for tool-extension.
+async fn initialize_tool(
     wasm_bytes: Vec<u8>,
     config: String,
     event_tx: broadcast::Sender<event::Event>,
-) -> Result<Initialized, Error> {
-    let mut cfg = Config::new();
-    cfg.wasm_component_model(true);
-    let engine = Engine::new(&cfg)?;
-    let component = Component::new(&engine, &wasm_bytes)?;
+) -> Result<InitializedTool, Error> {
+    let (engine, component, mut store) = prepare_component(&wasm_bytes, event_tx)?;
 
-    validate_tool_world_exports(&engine, &component)?;
+    validate_world_exports(DEFAULT_WORLD, &engine, &component)?;
 
     let linker = build_tool_linker(&engine)?;
-
-    let wasi = WasiCtxBuilder::new().inherit_stderr().inherit_stdout().build();
-    let state = State {
-        wasi,
-        http: WasiHttpCtx::new(),
-        table: ResourceTable::new(),
-        events: event_tx,
-    };
-    let mut store = Store::new(&engine, state);
-
     let bindings = ToolExtension::instantiate_async(&mut store, &component, &linker).await?;
 
     // Fetch metadata first (stateless), then call init.
@@ -264,17 +433,73 @@ async fn initialize(
         return Err(Error::ExtensionLoadError(msg));
     }
 
-    Ok(Initialized {
+    Ok(InitializedTool {
         bindings,
         store,
         metadata,
     })
 }
 
-/// Register WASI, WASI-HTTP, and the host-events interface.
+/// Compile, instantiate, `init`, and capture metadata for block-extension.
+async fn initialize_block(
+    wasm_bytes: Vec<u8>,
+    config: String,
+    event_tx: broadcast::Sender<event::Event>,
+) -> Result<InitializedBlock, Error> {
+    let (engine, component, mut store) = prepare_component(&wasm_bytes, event_tx)?;
+
+    validate_world_exports(BLOCK_WORLD, &engine, &component)?;
+
+    let linker = build_block_linker(&engine)?;
+    let bindings = BlockExtension::instantiate_async(&mut store, &component, &linker).await?;
+
+    let ext_guest = bindings.emporium_extensions_extension();
+    let metadata = ext_guest.call_get_metadata(&mut store).await?;
+    let init_result = ext_guest.call_init(&mut store, &config).await?;
+    if let Err(msg) = init_result {
+        return Err(Error::ExtensionLoadError(msg));
+    }
+
+    Ok(InitializedBlock {
+        bindings,
+        store,
+        metadata,
+    })
+}
+
+/// Compile the component and build the wasmtime store with shared WASI/HTTP
+/// + host-events context. Used by both world-specific initialization paths.
+fn prepare_component(
+    wasm_bytes: &[u8],
+    event_tx: broadcast::Sender<event::Event>,
+) -> Result<(Engine, Component, Store<State>), Error> {
+    let mut cfg = Config::new();
+    cfg.wasm_component_model(true);
+    let engine = Engine::new(&cfg)?;
+    let component = Component::new(&engine, wasm_bytes)?;
+
+    let wasi = WasiCtxBuilder::new().inherit_stderr().inherit_stdout().build();
+    let state = State {
+        wasi,
+        http: WasiHttpCtx::new(),
+        table: ResourceTable::new(),
+        events: event_tx,
+    };
+    let store = Store::new(&engine, state);
+    Ok((engine, component, store))
+}
+
+/// Register WASI, WASI-HTTP, and the host-events interface for tool-extension.
 fn build_tool_linker(engine: &Engine) -> Result<Linker<State>, Error> {
     let mut linker = build_base_linker(engine)?;
     ToolExtension::add_to_linker::<State, HostEventsData>(&mut linker, |s| s)?;
+    Ok(linker)
+}
+
+/// Register WASI, WASI-HTTP, and the host-events interface for block-extension.
+fn build_block_linker(engine: &Engine) -> Result<Linker<State>, Error> {
+    let mut linker = build_base_linker(engine)?;
+    BlockExtension::add_to_linker::<State, HostEventsData>(&mut linker, |s| s)?;
     Ok(linker)
 }
 
@@ -287,12 +512,22 @@ fn build_base_linker(engine: &Engine) -> Result<Linker<State>, Error> {
     Ok(linker)
 }
 
-/// Strict-match validation for the `tool-extension` world. Exports must
-/// contain exactly `extension` and `tool-provider`, versioned at
+/// Strict-match validation for a declared world. Exports must contain
+/// exactly the required interface set for the world, versioned at
 /// [`WIT_VERSION`], and nothing else.
-fn validate_tool_world_exports(engine: &Engine, component: &Component) -> Result<(), Error> {
-    let declared = DEFAULT_WORLD.to_string();
-    let required: Vec<String> = ["extension", "tool-provider"]
+///
+/// | World             | Required exports                               |
+/// |-------------------|------------------------------------------------|
+/// | `tool-extension`  | `extension`, `tool-provider`                   |
+/// | `block-extension` | `extension`, `tool-provider`, `block-provider` |
+fn validate_world_exports(declared: &str, engine: &Engine, component: &Component) -> Result<(), Error> {
+    let required_names: &[&str] = match declared {
+        DEFAULT_WORLD => &["extension", "tool-provider"],
+        BLOCK_WORLD => &["extension", "tool-provider", "block-provider"],
+        other => return Err(Error::UnsupportedWorld(other.to_string())),
+    };
+
+    let required: Vec<String> = required_names
         .iter()
         .map(|name| format!("{WIT_PACKAGE}/{name}@{WIT_VERSION}"))
         .collect();
@@ -309,7 +544,10 @@ fn validate_tool_world_exports(engine: &Engine, component: &Component) -> Result
         .cloned()
         .collect();
     if !missing.is_empty() {
-        return Err(Error::WorldMissingExports { declared, missing });
+        return Err(Error::WorldMissingExports {
+            declared: declared.to_string(),
+            missing,
+        });
     }
 
     let extra: Vec<String> = actual
@@ -317,31 +555,90 @@ fn validate_tool_world_exports(engine: &Engine, component: &Component) -> Result
         .filter(|name| !required.iter().any(|n| n == name))
         .collect();
     if !extra.is_empty() {
-        return Err(Error::WorldExtraExports { declared, extra });
+        return Err(Error::WorldExtraExports {
+            declared: declared.to_string(),
+            extra,
+        });
     }
 
     Ok(())
 }
 
-/// Dispatch a single typed [`Request`] to the wasmtime bindings and reply.
-async fn handle_request(request: Request, bindings: &ToolExtension, store: &mut Store<State>) {
+/// Dispatch a single typed [`Request`] against the tool-extension bindings.
+///
+/// `Block*` variants should not arrive here — [`Extension::block`](crate::Extension::block)
+/// only hands out providers when the worker is block-capable. If one does
+/// arrive (caller bug), the reply surfaces [`Error::UnsupportedWorld`].
+async fn handle_tool_request(request: Request, bindings: &ToolExtension, store: &mut Store<State>) {
     match request {
         Request::ListTools { reply } => {
-            let outcome = list_tools(bindings, store).await;
+            let outcome = tool_list_tools(bindings, store).await;
             let _ = reply.send(outcome);
         }
         Request::ExecuteTool { name, params, reply } => {
-            let outcome = execute_tool(bindings, store, &name, &params).await;
+            let outcome = tool_execute_tool(bindings, store, &name, &params).await;
             let _ = reply.send(outcome);
         }
         Request::View { reply } => {
-            let outcome = view(bindings, store).await;
+            let outcome = tool_view(bindings, store).await;
+            let _ = reply.send(outcome);
+        }
+        Request::BlockTypes { reply } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(DEFAULT_WORLD.to_string())));
+        }
+        Request::BlockCreate { reply, .. } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(DEFAULT_WORLD.to_string())));
+        }
+        Request::BlockPlan { reply, .. } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(DEFAULT_WORLD.to_string())));
+        }
+        Request::BlockValidate { reply, .. } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(DEFAULT_WORLD.to_string())));
+        }
+    }
+}
+
+/// Dispatch a single typed [`Request`] against the block-extension bindings.
+async fn handle_block_request(request: Request, bindings: &BlockExtension, store: &mut Store<State>) {
+    match request {
+        Request::ListTools { reply } => {
+            let outcome = block_list_tools(bindings, store).await;
+            let _ = reply.send(outcome);
+        }
+        Request::ExecuteTool { name, params, reply } => {
+            let outcome = block_execute_tool(bindings, store, &name, &params).await;
+            let _ = reply.send(outcome);
+        }
+        Request::View { reply } => {
+            let outcome = block_view(bindings, store).await;
+            let _ = reply.send(outcome);
+        }
+        Request::BlockTypes { reply } => {
+            let outcome = block_types(bindings, store).await;
+            let _ = reply.send(outcome);
+        }
+        Request::BlockCreate { kind, input, reply } => {
+            let outcome = block_create(bindings, store, &kind, &input).await;
+            let _ = reply.send(outcome);
+        }
+        Request::BlockPlan {
+            kind,
+            state,
+            operation,
+            input,
+            reply,
+        } => {
+            let outcome = block_plan(bindings, store, &kind, &state, &operation, &input).await;
+            let _ = reply.send(outcome);
+        }
+        Request::BlockValidate { kind, state, reply } => {
+            let outcome = block_validate(bindings, store, &kind, &state).await;
             let _ = reply.send(outcome);
         }
     }
 }
 
-async fn list_tools(bindings: &ToolExtension, store: &mut Store<State>) -> Result<Vec<tool::Info>, Error> {
+async fn tool_list_tools(bindings: &ToolExtension, store: &mut Store<State>) -> Result<Vec<tool::Info>, Error> {
     let guest = bindings.emporium_extensions_tool_provider();
     let wit_tools = guest.call_list_tools(&mut *store).await?;
     wit_tools
@@ -350,7 +647,7 @@ async fn list_tools(bindings: &ToolExtension, store: &mut Store<State>) -> Resul
         .collect::<Result<Vec<_>, _>>()
 }
 
-async fn execute_tool(
+async fn tool_execute_tool(
     bindings: &ToolExtension,
     store: &mut Store<State>,
     name: &str,
@@ -362,139 +659,89 @@ async fn execute_tool(
     tool::Output::try_from(wit_output)
 }
 
-async fn view(bindings: &ToolExtension, store: &mut Store<State>) -> Result<String, Error> {
+async fn tool_view(bindings: &ToolExtension, store: &mut Store<State>) -> Result<String, Error> {
     let guest = bindings.emporium_extensions_extension();
     let s = guest.call_view(&mut *store).await?;
     Ok(s)
 }
 
-// ---------------------------------------------------------------------------
-// Conversions from wasmtime-bindgen types to emporium-core types.
-//
-// These live in the host crate (not emporium-core) per the orphan rule:
-// emporium-core must not depend on wasmtime or any bindgen output.
-// ---------------------------------------------------------------------------
-
-impl From<wit_tool_provider::Activity> for tool::Activity {
-    fn from(a: wit_tool_provider::Activity) -> Self {
-        tool::Activity {
-            present: a.present,
-            past: a.past,
-            subject_field: a.subject_field,
-        }
-    }
+async fn block_list_tools(bindings: &BlockExtension, store: &mut Store<State>) -> Result<Vec<tool::Info>, Error> {
+    let guest = bindings.emporium_extensions_tool_provider();
+    let wit_tools = guest.call_list_tools(&mut *store).await?;
+    wit_tools
+        .into_iter()
+        .map(tool::Info::try_from)
+        .collect::<Result<Vec<_>, _>>()
 }
 
-impl TryFrom<wit_tool_provider::ToolInfo> for tool::Info {
-    type Error = Error;
-    fn try_from(info: wit_tool_provider::ToolInfo) -> Result<Self, Self::Error> {
-        let schema: serde_json::Value = if info.schema.is_empty() {
-            serde_json::Value::Null
-        } else {
-            serde_json::from_str(&info.schema)?
-        };
-        Ok(tool::Info {
-            id: info.id,
-            name: info.name,
-            description: info.description,
-            schema,
-            cacheable: info.cacheable,
-            activity: info.activity.map(tool::Activity::from),
-        })
-    }
+async fn block_execute_tool(
+    bindings: &BlockExtension,
+    store: &mut Store<State>,
+    name: &str,
+    params: &str,
+) -> Result<tool::Output, Error> {
+    let guest = bindings.emporium_extensions_tool_provider();
+    let wit_outcome = guest.call_execute_tool(&mut *store, name, params).await?;
+    let wit_output = wit_outcome.map_err(Error::ExtensionError)?;
+    tool::Output::try_from(wit_output)
 }
 
-impl From<wit_tool_provider::ColumnDef> for column::Def {
-    fn from(c: wit_tool_provider::ColumnDef) -> Self {
-        column::Def {
-            name: c.name,
-            alias: c.alias,
-            dtype: c.dtype,
-        }
-    }
+async fn block_view(bindings: &BlockExtension, store: &mut Store<State>) -> Result<String, Error> {
+    let guest = bindings.emporium_extensions_extension();
+    let s = guest.call_view(&mut *store).await?;
+    Ok(s)
 }
 
-impl From<wit_tool_provider::TextOutput> for tool::Text {
-    fn from(t: wit_tool_provider::TextOutput) -> Self {
-        tool::Text {
-            content: t.content,
-            label: t.label.map(tool::Label::new),
-            source: t.source,
-            store: t.store,
-            description: t.description,
-            nickname: t.nickname,
-        }
-    }
+async fn block_types(bindings: &BlockExtension, store: &mut Store<State>) -> Result<Vec<block::TypeInfo>, Error> {
+    let guest = bindings.emporium_extensions_block_provider();
+    let wit_types = guest.call_get_block_types(&mut *store).await?;
+    Ok(wit_types.into_iter().map(block::TypeInfo::from).collect())
 }
 
-impl TryFrom<wit_tool_provider::DataFrameOutput> for tool::DataFrame {
-    type Error = Error;
-    fn try_from(df: wit_tool_provider::DataFrameOutput) -> Result<Self, Self::Error> {
-        let schema: Vec<column::Def> = df.schema.into_iter().map(column::Def::from).collect();
-        let data: serde_json::Value = if df.rows.is_empty() {
-            serde_json::Value::Null
-        } else {
-            serde_json::from_str(&df.rows)?
-        };
-        let metadata = match df.metadata {
-            Some(s) if !s.is_empty() => Some(serde_json::from_str::<serde_json::Value>(&s)?),
-            _ => None,
-        };
-        Ok(tool::DataFrame {
-            schema,
-            data,
-            metadata,
-            label: df.label.map(tool::Label::new),
-            source: df.source,
-            store: df.store,
-            description: df.description,
-            nickname: df.nickname,
-        })
-    }
+async fn block_create(
+    bindings: &BlockExtension,
+    store: &mut Store<State>,
+    kind: &str,
+    input: &str,
+) -> Result<String, Error> {
+    let guest = bindings.emporium_extensions_block_provider();
+    let wit_outcome = guest.call_create(&mut *store, kind, input).await?;
+    wit_outcome.map_err(Error::BlockOperation)
 }
 
-impl TryFrom<wit_tool_provider::ToolOutput> for tool::Output {
-    type Error = Error;
-    fn try_from(out: wit_tool_provider::ToolOutput) -> Result<Self, Self::Error> {
-        match out {
-            wit_tool_provider::ToolOutput::TextOutput(t) => Ok(tool::Output::Text(t.into())),
-            wit_tool_provider::ToolOutput::DataFrameOutput(df) => Ok(tool::Output::DataFrame(df.try_into()?)),
-        }
-    }
+async fn block_plan(
+    bindings: &BlockExtension,
+    store: &mut Store<State>,
+    kind: &str,
+    state: &str,
+    operation: &str,
+    input: &str,
+) -> Result<plan::Outcome, Error> {
+    let guest = bindings.emporium_extensions_block_provider();
+    let wit_outcome = guest.call_plan(&mut *store, kind, state, operation, input).await?;
+    let wit_plan = wit_outcome.map_err(Error::BlockOperation)?;
+    Ok(plan::Outcome::from(wit_plan))
 }
 
-impl From<wit_host_events::Progress> for event::Progress {
-    fn from(p: wit_host_events::Progress) -> Self {
-        event::Progress {
-            percent: p.percent,
-            message: p.message,
-        }
-    }
+async fn block_validate(
+    bindings: &BlockExtension,
+    store: &mut Store<State>,
+    kind: &str,
+    state: &str,
+) -> Result<(), Error> {
+    let guest = bindings.emporium_extensions_block_provider();
+    let wit_outcome = guest.call_validate(&mut *store, kind, state).await?;
+    wit_outcome.map_err(Error::BlockOperation)
 }
 
-impl From<wit_host_events::Invalidate> for event::Invalidate {
-    fn from(i: wit_host_events::Invalidate) -> Self {
-        match i {
-            wit_host_events::Invalidate::Resource(id) => event::Invalidate::Resource(id),
-            wit_host_events::Invalidate::Tool(name) => event::Invalidate::Tool(name),
-            wit_host_events::Invalidate::All => event::Invalidate::All,
-        }
-    }
-}
-
-impl From<wit_host_events::Event> for event::Event {
-    fn from(e: wit_host_events::Event) -> Self {
-        match e {
-            wit_host_events::Event::Progress(p) => event::Event::Progress(p.into()),
-            wit_host_events::Event::ToolsChanged => event::Event::ToolsChanged,
-            wit_host_events::Event::Invalidate(i) => event::Event::Invalidate(i.into()),
-        }
-    }
-}
+// Conversions from wasmtime-bindgen types to canonical core types live in
+// `src/convert.rs` — one set of From/TryFrom impls per bindings module.
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use block_bindings::exports::emporium::extensions::block_provider as wit_block_provider;
+    use tool_bindings::exports::emporium::extensions::tool_provider as wit_tool_provider;
 
     #[test]
     fn from_tool_info_round_trip() {
@@ -624,6 +871,55 @@ mod tests {
         match event::Event::from(inv) {
             event::Event::Invalidate(event::Invalidate::Tool(name)) => assert_eq!(name, "get"),
             other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_block_type_info_round_trip() {
+        let wit = wit_block_provider::BlockTypeInfo {
+            kind: "prefix-tracker".into(),
+            name: "Prefix Tracker".into(),
+            description: "Tracks key prefixes in the KV store".into(),
+        };
+        let info = block::TypeInfo::from(wit);
+        assert_eq!(info.kind, "prefix-tracker");
+        assert_eq!(info.name, "Prefix Tracker");
+        assert_eq!(info.description, "Tracks key prefixes in the KV store");
+    }
+
+    #[test]
+    fn plan_outcome_covers_all_five_variants() {
+        match plan::Outcome::from(wit_block_provider::PlanOutcome::StateUpdate("s1".into())) {
+            plan::Outcome::StateUpdate(s) => assert_eq!(s, "s1"),
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+
+        match plan::Outcome::from(wit_block_provider::PlanOutcome::Query("q1".into())) {
+            plan::Outcome::Query(q) => assert_eq!(q, "q1"),
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+
+        let paired = wit_block_provider::PlanOutcome::StateUpdateWithQuery(("s2".into(), "q2".into()));
+        match plan::Outcome::from(paired) {
+            plan::Outcome::StateUpdateWithQuery(s, q) => {
+                assert_eq!(s, "s2");
+                assert_eq!(q, "q2");
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+
+        match plan::Outcome::from(wit_block_provider::PlanOutcome::Computed("c1".into())) {
+            plan::Outcome::Computed(c) => assert_eq!(c, "c1"),
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+
+        let paired = wit_block_provider::PlanOutcome::StateUpdateWithComputed(("s3".into(), "c2".into()));
+        match plan::Outcome::from(paired) {
+            plan::Outcome::StateUpdateWithComputed(s, c) => {
+                assert_eq!(s, "s3");
+                assert_eq!(c, "c2");
+            }
+            other => panic!("unexpected outcome: {other:?}"),
         }
     }
 }

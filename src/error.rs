@@ -41,6 +41,10 @@ pub enum Error {
     #[error("Extension error: {0}")]
     ExtensionError(String),
 
+    /// The extension's block-provider returned an error from a typed call.
+    #[error("Block-provider error: {0}")]
+    BlockOperation(String),
+
     /// The extension manifest was invalid.
     #[error("Manifest error: {0}")]
     ManifestError(ManifestError),
