@@ -22,6 +22,7 @@
 //! ```
 
 pub mod block;
+pub mod discovery;
 pub mod error;
 pub mod extension;
 pub mod formula;
@@ -33,6 +34,7 @@ mod convert;
 mod wasm;
 
 // Re-exports
+pub use discovery::{SearchIndex, SearchResult};
 pub use emporium_types::ManifestTool;
 pub use error::Error;
 pub use extension::Extension;
