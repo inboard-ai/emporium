@@ -46,16 +46,27 @@ async fn loads_lists_and_executes_kv_tools() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn progress_event_fanned_out_to_subscribers() {
-    let ext = Extension::load(KV_EXTENSION_PATH, json!({}))
-        .await
-        .expect("load extension");
+    let registry = DataRegistry::new();
+    registry.register("kv-keys", kv_keys_schema(), vec![json!({"key": "x"})]);
 
-    // Subscribe *before* the tool call so we don't miss the event.
+    let bytes = std::fs::read(KV_EXTENSION_PATH).expect("read kv extension bytes");
+    let ext = Extension::from_bytes_with_data(&bytes, json!({}), registry)
+        .await
+        .expect("load extension with host data");
+
+    let provider = ext.block().expect("block provider should be available");
+    let state = provider
+        .create("prefix-tracker", json!({"prefixes": ["x"]}))
+        .await
+        .expect("create prefix-tracker block");
+
+    // Subscribe *before* the compute call so we don't miss the event.
     let mut events = ext.events();
 
-    ext.execute_tool("stats", json!({}))
+    provider
+        .plan("prefix-tracker", &state, "analyze", json!({}))
         .await
-        .expect("stats should succeed");
+        .expect("analyze should succeed");
 
     let received = tokio::time::timeout(Duration::from_secs(2), events.recv())
         .await
@@ -65,8 +76,8 @@ async fn progress_event_fanned_out_to_subscribers() {
     match received {
         event::Event::Progress(progress) => {
             assert!(
-                progress.message.contains("stats"),
-                "progress message should mention 'stats', got: {:?}",
+                progress.message.contains("analyze"),
+                "progress message should mention 'analyze', got: {:?}",
                 progress.message
             );
         }

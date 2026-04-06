@@ -145,6 +145,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
                 dispatch_tool(&ext, "set", json!({ "key": parts[1], "value": parts[2] })).await;
+                sync_keys_silent(&ext, &registry).await;
             }
             "delete" | "del" => {
                 if parts.len() < 2 {
@@ -152,9 +153,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
                 dispatch_tool(&ext, "delete", json!({ "key": parts[1] })).await;
+                sync_keys_silent(&ext, &registry).await;
             }
             "list" | "keys" | "all" => dispatch_tool(&ext, "get_all", json!({})).await,
-            "clear" => dispatch_tool(&ext, "clear", json!({})).await,
+            "clear" => {
+                dispatch_tool(&ext, "clear", json!({})).await;
+                sync_keys_silent(&ext, &registry).await;
+            }
             "stats" => dispatch_tool(&ext, "stats", json!({})).await,
             "tools" => match ext.list_tools().await {
                 Ok(tools) => {
@@ -555,11 +560,21 @@ fn kv_keys_schema() -> Vec<column::Def> {
 /// resource. Calls `list_keys`, pulls the `DataFrame` rows, and re-registers
 /// them under the same id so the extension's cursor sees the updated data.
 async fn sync_keys(ext: &Extension, registry: &DataRegistry) {
+    let count = sync_keys_silent(ext, registry).await;
+    if let Some(n) = count {
+        println!("Synced {n} keys to kv-keys resource");
+    }
+}
+
+/// Core sync logic shared by the explicit `sync-keys` command and the
+/// automatic post-mutation sync. Returns `Some(row_count)` on success,
+/// `None` on failure (errors are printed inline).
+async fn sync_keys_silent(ext: &Extension, registry: &DataRegistry) -> Option<usize> {
     let output = match ext.execute_tool("list_keys", json!({})).await {
         Ok(output) => output,
         Err(err) => {
             println!("Error running list_keys: {err}");
-            return;
+            return None;
         }
     };
 
@@ -568,7 +583,7 @@ async fn sync_keys(ext: &Extension, registry: &DataRegistry) {
         other => {
             let _ = other;
             println!("Unexpected list_keys output variant (expected DataFrame)");
-            return;
+            return None;
         }
     };
 
@@ -576,13 +591,13 @@ async fn sync_keys(ext: &Extension, registry: &DataRegistry) {
         Some(rows) => rows.clone(),
         None => {
             println!("Unexpected list_keys data shape (expected JSON array)");
-            return;
+            return None;
         }
     };
 
     let count = rows.len();
     registry.register(KV_KEYS_RESOURCE, kv_keys_schema(), rows);
-    println!("Synced {count} keys to kv-keys resource");
+    Some(count)
 }
 
 /// Run the `analyze` block operation and print the resulting character

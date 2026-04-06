@@ -63,8 +63,6 @@ impl ToolProviderGuest for Component {
     }
 
     fn execute_tool(name: String, params: String) -> Result<ToolOutput, String> {
-        // Emit a progress event so the host can surface activity in UI/logs.
-        notify_progress(&name);
         let parsed: Value = serde_json::from_str(&params).map_err(|err| format!("invalid params JSON: {err}"))?;
         execute_tool(&name, &parsed)
     }
@@ -120,10 +118,12 @@ impl BlockProviderGuest for Component {
                 }
             }
             "analyze" => {
+                notify_progress("analyze");
                 let freq_json = analyze_keys()?;
                 Ok(PlanOutcome::Computed(freq_json))
             }
             "add_and_analyze" => {
+                notify_progress("add_and_analyze");
                 let prefix = require_str(&input_value, "prefix")?.to_string();
                 if !prefixes.contains(&prefix) {
                     prefixes.push(prefix);
