@@ -32,6 +32,10 @@ pub fn create_package(extension_path: &Path, output_path: &Path) -> Result<()> {
     validate_wasm(&wasm_path)?;
     println!("  WASM validated: {}", manifest.component.entry);
 
+    // Report world
+    let world = manifest.component.world.as_deref().unwrap_or("tool-extension");
+    println!("  World: {}", world);
+
     // Compute WASM checksum
     let wasm_bytes =
         fs::read(&wasm_path).with_context(|| format!("Failed to read WASM file: {}", wasm_path.display()))?;
@@ -73,6 +77,14 @@ fn create_enhanced_manifest(extension_path: &Path, checksum: &str) -> Result<Str
     // Parse as a TOML table so we can add to it
     let mut doc: toml::Table = toml::from_str(&original)?;
 
+    // Resolve the world: use declared value or default to "tool-extension"
+    let world = doc
+        .get("component")
+        .and_then(|c| c.as_table())
+        .and_then(|t| t.get("world"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("tool-extension");
+
     // Create package section
     let mut package = toml::Table::new();
     package.insert("created_at".to_string(), toml::Value::String(Utc::now().to_rfc3339()));
@@ -81,6 +93,7 @@ fn create_enhanced_manifest(extension_path: &Path, checksum: &str) -> Result<Str
         "packager_version".to_string(),
         toml::Value::String(PACKAGER_VERSION.to_string()),
     );
+    package.insert("world".to_string(), toml::Value::String(world.to_string()));
 
     doc.insert("package".to_string(), toml::Value::Table(package));
 
