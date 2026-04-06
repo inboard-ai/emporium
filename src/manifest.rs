@@ -35,10 +35,6 @@ pub struct Manifest {
     /// When absent the host defaults to `"tool-extension"`.
     #[serde(default)]
     pub world: Option<String>,
-    /// WASM component entry point (internal use)
-    #[serde(skip)]
-    #[allow(dead_code)]
-    pub(crate) component_entry: String,
 }
 
 impl Manifest {
@@ -65,9 +61,6 @@ pub(crate) struct RawManifest {
     pub config: ConfigSection,
     #[serde(default)]
     pub tools: Option<Vec<RawTool>>,
-    /// Kept for backward compatibility during migration.
-    #[serde(default)]
-    pub operations: Option<HashMap<String, toml::Value>>,
     #[serde(default)]
     pub capabilities: Option<HashMap<String, toml::Value>>,
 }
@@ -97,6 +90,8 @@ pub(crate) struct ExtensionSection {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ComponentSection {
+    /// Consumed by the package loader; kept here so serde accepts the field.
+    #[allow(dead_code)]
     pub entry: String,
     #[serde(default)]
     pub world: Option<String>,
@@ -113,7 +108,6 @@ impl RawManifest {
         let config_schema: serde_json::Value = serde_json::from_str(&self.config.schema)
             .map_err(|e| crate::Error::Custom(format!("Invalid config schema JSON: {}", e)))?;
 
-        // Parse [[tools]] entries, falling back to old [operations] for backward compat
         let tools = if let Some(raw_tools) = self.tools {
             raw_tools
                 .into_iter()
@@ -121,15 +115,6 @@ impl RawManifest {
                     id: t.id,
                     name: t.name,
                     description: t.description,
-                })
-                .collect()
-        } else if let Some(ops) = &self.operations {
-            ops.iter()
-                .filter(|(k, _)| k.as_str() != "required")
-                .map(|(k, v)| ManifestTool {
-                    id: k.clone(),
-                    name: k.clone(),
-                    description: v.as_str().unwrap_or("").to_string(),
                 })
                 .collect()
         } else {
@@ -163,7 +148,6 @@ impl RawManifest {
             tools,
             config_schema,
             world: self.component.world,
-            component_entry: self.component.entry,
         })
     }
 }

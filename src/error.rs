@@ -17,22 +17,6 @@ pub enum Error {
     #[error("Wasm error: {0}")]
     Wasm(Arc<wasmtime::Error>),
 
-    /// The named extension could not be resolved in a registry.
-    #[error("NotFound: {0}")]
-    RegistryNotFound(String),
-
-    /// An entry with this identifier already exists in a registry.
-    #[error("AlreadyExists: {0}")]
-    RegistryAlreadyExists(String),
-
-    /// Failed to send a request to the worker thread (receiver closed).
-    #[error("SendError: the worker receiver has been dropped")]
-    SendError,
-
-    /// The named extension could not be found on disk.
-    #[error("Extension not found: {0}")]
-    ExtensionNotFound(String),
-
     /// An extension failed to load for an unspecified reason.
     #[error("Extension load error: {0}")]
     ExtensionLoadError(String),
@@ -180,13 +164,6 @@ mod tests {
         assert!(
             s.contains("y"),
             "WorldExtraExports display should mention extras, got: {s}"
-        );
-
-        let send = Error::SendError;
-        assert!(
-            send.to_string().contains("worker"),
-            "SendError display should mention 'worker', got: {}",
-            send
         );
 
         let unsupported = Error::UnsupportedWorld("abc".into());
