@@ -1453,6 +1453,7 @@ mod tests {
                 past: "Got".into(),
                 subject_field: "/key".into(),
             }),
+            examples: vec![],
         };
 
         let info = tool::Info::try_from(wit).unwrap();
@@ -1479,6 +1480,7 @@ mod tests {
             schema: "".into(),
             cacheable: false,
             activity: None,
+            examples: vec![],
         };
         let info = tool::Info::try_from(wit).unwrap();
         assert_eq!(info.schema, serde_json::Value::Null);

@@ -52,6 +52,7 @@ interface tool-provider {
         schema: string,
         cacheable: bool,
         activity: option<activity>,
+        examples: list<string>,
     }
 
     record text-output {

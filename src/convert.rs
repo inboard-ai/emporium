@@ -54,6 +54,11 @@ macro_rules! impl_tool_and_events {
                     schema,
                     cacheable: info.cacheable,
                     activity: info.activity.map(tool::Activity::from),
+                    examples: info
+                        .examples
+                        .into_iter()
+                        .map(|s| serde_json::from_str(&s))
+                        .collect::<Result<Vec<_>, _>>()?,
                 })
             }
         }

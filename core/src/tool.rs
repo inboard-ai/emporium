@@ -28,6 +28,9 @@ pub struct Info {
     /// Optional display hints for live/completed status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity: Option<Activity>,
+    /// Example parameter sets for AI-agent-driven tool discovery.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<Value>,
 }
 
 /// Display hints for live/completed status of a tool invocation.
@@ -77,6 +80,7 @@ mod tests {
                 past: "Queried".to_string(),
                 subject_field: "/query".to_string(),
             }),
+            examples: vec![json!({"key": "test"})],
         };
         let encoded = serde_json::to_string(&original).unwrap();
         let decoded: Info = serde_json::from_str(&encoded).unwrap();
@@ -85,6 +89,7 @@ mod tests {
         assert_eq!(decoded.description, original.description);
         assert_eq!(decoded.schema, original.schema);
         assert_eq!(decoded.cacheable, original.cacheable);
+        assert_eq!(decoded.examples, original.examples);
         let activity = decoded.activity.unwrap();
         assert_eq!(activity.present, "Querying");
         assert_eq!(activity.past, "Queried");
@@ -102,6 +107,7 @@ mod tests {
         let decoded: Info = serde_json::from_value(raw).unwrap();
         assert!(!decoded.cacheable);
         assert!(decoded.activity.is_none());
+        assert!(decoded.examples.is_empty());
     }
 
     #[test]
@@ -113,9 +119,31 @@ mod tests {
             schema: json!({}),
             cacheable: false,
             activity: None,
+            examples: vec![],
         };
         let encoded = serde_json::to_value(&info).unwrap();
         assert!(encoded.get("activity").is_none());
+        assert!(encoded.get("examples").is_none());
+    }
+
+    #[test]
+    fn info_examples_roundtrip() {
+        let info = Info {
+            id: "t".to_string(),
+            name: "T".to_string(),
+            description: "".to_string(),
+            schema: json!({}),
+            cacheable: false,
+            activity: None,
+            examples: vec![
+                json!({"symbol": "AAPL"}),
+                json!({"symbol": "MSFT", "outputsize": "full"}),
+            ],
+        };
+        let encoded = serde_json::to_string(&info).unwrap();
+        let decoded: Info = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.examples.len(), 2);
+        assert_eq!(decoded.examples[0]["symbol"], "AAPL");
     }
 
     #[test]

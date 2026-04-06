@@ -248,6 +248,7 @@ fn tool_list() -> Vec<ToolInfo> {
             .to_string(),
             cacheable: false,
             activity: None,
+            examples: vec![r#"{"key": "my-key"}"#.to_string()],
         },
         ToolInfo {
             id: "set".to_string(),
@@ -264,6 +265,7 @@ fn tool_list() -> Vec<ToolInfo> {
             .to_string(),
             cacheable: false,
             activity: None,
+            examples: vec![r#"{"key": "greeting", "value": "hello world"}"#.to_string()],
         },
         ToolInfo {
             id: "delete".to_string(),
@@ -279,6 +281,7 @@ fn tool_list() -> Vec<ToolInfo> {
             .to_string(),
             cacheable: false,
             activity: None,
+            examples: vec![r#"{"key": "old-key"}"#.to_string()],
         },
         ToolInfo {
             id: "get_all".to_string(),
@@ -291,6 +294,7 @@ fn tool_list() -> Vec<ToolInfo> {
             .to_string(),
             cacheable: false,
             activity: None,
+            examples: vec![],
         },
         ToolInfo {
             id: "clear".to_string(),
@@ -303,6 +307,7 @@ fn tool_list() -> Vec<ToolInfo> {
             .to_string(),
             cacheable: false,
             activity: None,
+            examples: vec![],
         },
         ToolInfo {
             id: "stats".to_string(),
@@ -315,6 +320,7 @@ fn tool_list() -> Vec<ToolInfo> {
             .to_string(),
             cacheable: false,
             activity: None,
+            examples: vec![],
         },
         ToolInfo {
             id: "list_keys".to_string(),
@@ -327,6 +333,7 @@ fn tool_list() -> Vec<ToolInfo> {
             .to_string(),
             cacheable: false,
             activity: None,
+            examples: vec![],
         },
     ]
 }
