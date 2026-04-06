@@ -84,6 +84,29 @@ registry.register("resource-id", schema, rows);
 let ext = Extension::load_with_data("ext.empkg", json!({}), registry).await?;
 ```
 
+## Manifest v2 and tool discovery
+
+Extensions declare their capabilities in `manifest.toml`. As of Phase 8, the
+manifest requires two additional fields for AI-agent-driven tool discovery:
+
+- **`overview`** (extension-level) — an LLM-facing description of the
+  extension's capabilities, written to be keyword-dense and specific.
+- **`schema`** (per tool) — a JSON Schema string describing each tool's
+  parameters.
+
+Optional but recommended fields include `topics` (searchable tags),
+`examples` (sample inputs), `primary` (include tool in the LLM system
+prompt), `cacheable`, and `activity` (display hints).
+
+The host exposes a `SearchIndex` (in `src/discovery.rs`) that indexes all
+loaded extensions and supports fuzzy tool search via a `search_tools`
+meta-tool. Non-primary tools are discovered through this search rather than
+being listed upfront.
+
+Run `cargo emporium validate` to check that your manifest conforms to v2.
+See [`docs/EXTENSION_MIGRATION_GUIDE.md`](docs/EXTENSION_MIGRATION_GUIDE.md)
+for the full field reference and migration checklist.
+
 ## Running the example
 
 The `kv-repl` example builds the `kv-extension` WASM component automatically via its `build.rs` and loads it into a REPL host:
