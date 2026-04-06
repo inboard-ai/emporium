@@ -146,10 +146,10 @@ pub fn validate_manifest(path: &Path) -> Result<Manifest> {
 
             for (j, example) in examples.iter().enumerate() {
                 let example_str = example.as_str().unwrap_or("");
-                if !example_str.is_empty() {
-                    if let Err(e) = serde_json::from_str::<serde_json::Value>(example_str) {
-                        bail!("tools[{}] '{}': examples[{}] must be valid JSON: {}", i, id, j, e);
-                    }
+                if !example_str.is_empty()
+                    && let Err(e) = serde_json::from_str::<serde_json::Value>(example_str)
+                {
+                    bail!("tools[{}] '{}': examples[{}] must be valid JSON: {}", i, id, j, e);
                 }
             }
         }
@@ -187,7 +187,7 @@ fn validate_extension_section(ext: &ExtensionSection) -> Result<()> {
     }
 
     // overview is required for manifest v2
-    if ext.overview.as_ref().map_or(true, |o| o.trim().is_empty()) {
+    if ext.overview.as_ref().is_none_or(|o| o.trim().is_empty()) {
         bail!("extension.overview is required — provide an LLM-facing description of the extension's capabilities");
     }
 
