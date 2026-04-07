@@ -54,6 +54,10 @@ enum EmporiumCommands {
         /// Path to the extension directory (defaults to current directory)
         #[arg(short, long)]
         path: Option<PathBuf>,
+
+        /// Check that manifest tools are in sync with the WASM component
+        #[arg(long)]
+        check_sync: bool,
     },
 
     /// Check if the current version is available for publishing
@@ -82,9 +86,13 @@ fn main() -> Result<()> {
                 let output_path = output.unwrap_or_else(|| PathBuf::from("."));
                 package::create_package(&extension_path, &output_path)?;
             }
-            EmporiumCommands::Validate { path } => {
+            EmporiumCommands::Validate { path, check_sync } => {
                 let extension_path = path.unwrap_or_else(|| PathBuf::from("."));
-                validate::validate_extension(&extension_path)?;
+                if check_sync {
+                    validate::validate_check_sync(&extension_path)?;
+                } else {
+                    validate::validate_extension(&extension_path)?;
+                }
                 println!("Extension is valid!");
             }
             EmporiumCommands::Check { path, registry } => {

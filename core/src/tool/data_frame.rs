@@ -1,36 +1,39 @@
-//! DataFrame tool result type
+//! DataFrame tool output type.
 
 use super::Label;
-use crate::{CoreError, Schema};
+use crate::{Error, column};
 use polars_core::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Columnar data that can be converted to polars DataFrame on the client
+/// Columnar data that can be converted to a polars DataFrame on the client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataFrame {
-    pub schema: Schema,
+    /// Schema describing each column.
+    pub schema: Vec<column::Def>,
+    /// Raw row- or column-oriented JSON data.
     pub data: Value,
+    /// Optional free-form metadata attached to the frame.
     pub metadata: Option<Value>,
-    /// Optional label for display (e.g., "AAPL" for stock data)
+    /// Optional label for display (e.g., "AAPL" for stock data).
     pub label: Option<Label>,
-    /// Human-readable description of the invocation (e.g., the SQL query)
+    /// Human-readable description of the invocation (e.g., the SQL query).
     #[serde(default)]
     pub source: Option<String>,
-    /// Per-result cache override — when set, overrides `ToolInfo.cacheable`
+    /// Per-output cache override — when set, overrides `tool::Info.cacheable`.
     #[serde(default)]
     pub store: Option<bool>,
-    /// Brief description of what the result contains
+    /// Brief description of what the output contains.
     #[serde(default)]
     pub description: Option<String>,
-    /// Short, no-spaces identifier for use in formulas (e.g., "combined_ratio")
+    /// Short, no-spaces identifier for use in formulas (e.g., "combined_ratio").
     #[serde(default)]
     pub nickname: Option<String>,
 }
 
 impl DataFrame {
-    /// Create a new DataFrame result
-    pub fn new(schema: Schema, data: Value, metadata: Option<Value>) -> Self {
+    /// Create a new DataFrame output.
+    pub fn new(schema: Vec<column::Def>, data: Value, metadata: Option<Value>) -> Self {
         Self {
             schema,
             data,
@@ -43,8 +46,8 @@ impl DataFrame {
         }
     }
 
-    /// Create a new DataFrame result with a label
-    pub fn with_label(schema: Schema, data: Value, metadata: Option<Value>, label: Label) -> Self {
+    /// Create a new DataFrame output with a label.
+    pub fn with_label(schema: Vec<column::Def>, data: Value, metadata: Option<Value>, label: Label) -> Self {
         Self {
             schema,
             data,
@@ -57,8 +60,8 @@ impl DataFrame {
         }
     }
 
-    /// Convert to polars DataFrame
-    pub fn to_dataframe(self) -> Result<polars_core::frame::DataFrame, CoreError> {
+    /// Convert to a polars DataFrame.
+    pub fn to_dataframe(self) -> Result<polars_core::frame::DataFrame, Error> {
         // Helper to convert string dtype to Polars DataType
         fn to_dtype(dtype: &str) -> DataType {
             match dtype {
@@ -170,7 +173,7 @@ impl DataFrame {
                 }
 
                 polars_core::frame::DataFrame::new(columns_vec)
-                    .map_err(|e| CoreError::DataFrameError(format!("Failed to create DataFrame: {}", e)))
+                    .map_err(|e| Error::DataFrame(format!("Failed to create DataFrame: {}", e)))
             }
 
             Value::Object(obj) => {
@@ -300,14 +303,113 @@ impl DataFrame {
                 }
 
                 polars_core::frame::DataFrame::new(columns_vec)
-                    .map_err(|e| CoreError::DataFrameError(format!("Failed to create DataFrame: {}", e)))
+                    .map_err(|e| Error::DataFrame(format!("Failed to create DataFrame: {}", e)))
             }
 
             Value::Null => Ok(polars_core::frame::DataFrame::empty()),
 
-            _ => Err(CoreError::DataFrameError(
+            _ => Err(Error::DataFrame(
                 "Data must be an array or object to convert to DataFrame".to_string(),
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn two_col_schema() -> Vec<column::Def> {
+        vec![
+            column::Def {
+                name: "a".to_string(),
+                alias: "A".to_string(),
+                dtype: "integer".to_string(),
+            },
+            column::Def {
+                name: "b".to_string(),
+                alias: "B".to_string(),
+                dtype: "string".to_string(),
+            },
+        ]
+    }
+
+    #[test]
+    fn data_frame_new_populates_schema_data_metadata() {
+        let schema = two_col_schema();
+        let data = json!([{"a": 1, "b": "x"}]);
+        let metadata = Some(json!({"src": "test"}));
+        let df = DataFrame::new(schema.clone(), data.clone(), metadata.clone());
+        assert_eq!(df.schema.len(), 2);
+        assert_eq!(df.data, data);
+        assert_eq!(df.metadata, metadata);
+        assert!(df.label.is_none());
+        assert!(df.source.is_none());
+        assert!(df.store.is_none());
+        assert!(df.description.is_none());
+        assert!(df.nickname.is_none());
+    }
+
+    #[test]
+    fn data_frame_with_label_populates_schema_data_label() {
+        let schema = two_col_schema();
+        let data = json!([]);
+        let df = DataFrame::with_label(schema, data, None, Label::new("L"));
+        assert_eq!(df.label.as_ref().map(|l| l.0.as_str()), Some("L"));
+    }
+
+    #[test]
+    fn to_dataframe_from_row_oriented_array() {
+        let schema = two_col_schema();
+        let data = json!([
+            {"a": 1, "b": "x"},
+            {"a": 2, "b": "y"},
+        ]);
+        let df = DataFrame::new(schema, data, None);
+        let polars_df = df.to_dataframe().unwrap();
+        assert_eq!(polars_df.height(), 2);
+        assert_eq!(polars_df.width(), 2);
+    }
+
+    #[test]
+    fn to_dataframe_from_empty_array_returns_empty_frame() {
+        let schema = two_col_schema();
+        let df = DataFrame::new(schema, json!([]), None);
+        let polars_df = df.to_dataframe().unwrap();
+        assert_eq!(polars_df.height(), 0);
+    }
+
+    #[test]
+    fn to_dataframe_from_null_data_returns_empty_frame() {
+        let schema = two_col_schema();
+        let df = DataFrame::new(schema, serde_json::Value::Null, None);
+        let polars_df = df.to_dataframe().unwrap();
+        assert_eq!(polars_df.height(), 0);
+    }
+
+    #[test]
+    fn to_dataframe_from_invalid_data_returns_error() {
+        let schema = two_col_schema();
+        let df = DataFrame::new(schema.clone(), json!("just a string"), None);
+        let err = df.to_dataframe().unwrap_err();
+        assert!(matches!(err, Error::DataFrame(_)));
+
+        let df = DataFrame::new(schema, json!(42), None);
+        let err = df.to_dataframe().unwrap_err();
+        assert!(matches!(err, Error::DataFrame(_)));
+    }
+
+    #[test]
+    fn to_dataframe_column_oriented_object_format() {
+        let schema = two_col_schema();
+        let data = json!({
+            "a": [1, 2, 3],
+            "b": ["x", "y", "z"],
+        });
+        let df = DataFrame::new(schema, data, None);
+        let polars_df = df.to_dataframe().unwrap();
+        assert_eq!(polars_df.height(), 3);
+        assert_eq!(polars_df.width(), 2);
     }
 }

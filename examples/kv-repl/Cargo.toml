@@ -6,6 +6,6 @@ publish = false
 
 [dependencies]
 emporium.workspace = true
-futures.workspace = true
+emporium-core.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

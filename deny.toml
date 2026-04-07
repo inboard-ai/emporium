@@ -1,6 +1,9 @@
 [advisories]
 unmaintained = "workspace"
 yanked = "warn"
+# rustls-webpki 0.102.8 pinned by wasmtime 43.0 -> tokio-rustls 0.25 -> rustls 0.22.
+# Tracked upstream; remove this ignore when wasmtime bumps its rustls stack.
+ignore = ["RUSTSEC-2026-0049"]
 
 [licenses]
 allow = [
@@ -14,6 +17,9 @@ allow = [
     "Zlib",
     "BSL-1.0",
     "CDLA-Permissive-2.0",
+    # wasmtime 43.0 -> wasm-compose -> im-rc -> sized-chunks (MPL-2.0+).
+    # MPL-2.0 is OSI-approved and compatible with MIT projects.
+    "MPL-2.0",
 ]
 
 [bans]

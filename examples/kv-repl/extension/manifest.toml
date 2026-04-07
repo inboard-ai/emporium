@@ -3,13 +3,82 @@ id = "kv"
 name = "Key-Value Store"
 version = "0.1.0"
 description = "A simple in-memory key-value store extension"
+overview = """
+In-memory key-value store with get, set, delete, clear, list, and stats
+operations. Supports listing all keys as a DataFrame, block-based prefix
+tracking with add/remove/rename operations, formulas for KV_COUNT,
+KV_GET, and KV_EXISTS, and cursor-based compute via host-data.
+"""
 author = "Emporium Team"
 license = "MIT"
 keywords = ["kv", "storage", "example"]
 categories = ["storage"]
+topics = ["key-value", "storage", "example"]
+features = ["Key-value CRUD", "DataFrame key listing", "Prefix tracking blocks", "KV formulas"]
 
 [component]
 entry = "target/wasm32-wasip1/release/kv_extension.wasm"
+world = "full-extension"
+emporium = "0.2.0"
 
 [config]
 schema = '{}'
+
+[[tools]]
+id = "get"
+name = "get"
+description = "Get the value for a key"
+schema = '{"type":"object","properties":{"key":{"type":"string","description":"The key to retrieve"}},"required":["key"]}'
+cacheable = false
+primary = true
+examples = ['{"key": "my-key"}']
+
+[[tools]]
+id = "set"
+name = "set"
+description = "Set a key to a value"
+schema = '{"type":"object","properties":{"key":{"type":"string","description":"The key to set"},"value":{"type":"string","description":"The value to store"}},"required":["key","value"]}'
+cacheable = false
+primary = true
+examples = ['{"key": "greeting", "value": "hello world"}']
+
+[[tools]]
+id = "delete"
+name = "delete"
+description = "Delete a key"
+schema = '{"type":"object","properties":{"key":{"type":"string","description":"The key to delete"}},"required":["key"]}'
+cacheable = false
+primary = false
+examples = ['{"key": "old-key"}']
+
+[[tools]]
+id = "get_all"
+name = "get_all"
+description = "List all key-value pairs"
+schema = '{"type":"object","properties":{}}'
+cacheable = false
+primary = false
+
+[[tools]]
+id = "clear"
+name = "clear"
+description = "Clear all entries"
+schema = '{"type":"object","properties":{}}'
+cacheable = false
+primary = false
+
+[[tools]]
+id = "stats"
+name = "stats"
+description = "Get store statistics"
+schema = '{"type":"object","properties":{}}'
+cacheable = false
+primary = false
+
+[[tools]]
+id = "list_keys"
+name = "list_keys"
+description = "List all keys as a single-column DataFrame"
+schema = '{"type":"object","properties":{}}'
+cacheable = false
+primary = false

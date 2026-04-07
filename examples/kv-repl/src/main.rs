@@ -1,29 +1,54 @@
 //! Interactive REPL for the KV extension.
 //!
-//! Demonstrates loading an extension and sending commands interactively.
+//! Demonstrates loading an extension and sending typed calls interactively.
 //! The KV extension is built automatically as part of the build process.
 //!
 //! Usage:
 //!   cargo run -p kv-repl
 //!
 //! Commands:
-//!   get <key>           - Get a value
-//!   set <key> <value>   - Set a value
-//!   delete <key>        - Delete a key
-//!   list                - List all keys
-//!   clear               - Clear all keys
-//!   stats               - Show store statistics
-//!   quit                - Exit the REPL
+//!   get <key>                     - Get a value
+//!   set <key> <value>             - Set a value
+//!   delete <key>                  - Delete a key
+//!   list                          - List all keys
+//!   clear                         - Clear all keys
+//!   stats                         - Show store statistics
+//!   tools                         - List available tools
+//!   view                          - Print the extension's rendered view
+//!   block-types                   - List block kinds advertised by the extension
+//!   block-create <prefix>...      - Create a prefix-tracker block
+//!   block-add <prefix>            - Add a prefix to the current block state
+//!   block-rename <old> <new>      - Rename a prefix and re-query matching keys
+//!   block-query                   - Run the current block's query plan
+//!   sync-keys                     - Mirror KV keys into the host-data `kv-keys` resource
+//!   analyze                       - Run prefix-tracker compute over kv-keys
+//!   add-analyze <prefix>          - Add prefix and re-analyze in one step
+//!   formulas                      - List formulas advertised by the extension
+//!   formula <name> [args...]      - Evaluate a formula with positional args
+//!   help                          - Print this help message
+//!   quit                          - Exit the REPL
+//!
+//! Typical compute workflow:
+//!   1. `set foo bar` / `set baz qux` to populate the KV store
+//!   2. `sync-keys` to mirror the keys into the host-data `kv-keys` resource
+//!   3. `block-create a b` to create a prefix-tracker block
+//!   4. `analyze` to run a character-frequency analysis via a host cursor
+//!   5. `add-analyze xyz` to extend the block's prefix list and re-analyze
 
 use std::io::{self, BufRead, Write};
+use std::time::Duration;
 
-use futures::StreamExt;
+use emporium::host_data::DataRegistry;
+use emporium::{Extension, block, formula};
+use emporium_core::{column, plan, tool};
+use serde_json::json;
+use tokio::sync::broadcast::error::RecvError;
 
-use emporium::data::Response;
-use emporium::{Command, Event, Extension};
-
-/// Path to the KV extension, set by build.rs
+/// Path to the KV extension, set by build.rs.
 const KV_EXTENSION_PATH: &str = env!("KV_EXTENSION_PATH");
+
+/// Timeout applied to every tool call round-trip.
+const TOOL_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::runtime::Builder::new_current_thread()
@@ -33,20 +58,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    // Use command line arg if provided, otherwise use the built-in extension
+    // Use command line arg if provided, otherwise use the built-in extension.
     let path = std::env::args().nth(1).unwrap_or_else(|| KV_EXTENSION_PATH.to_string());
 
-    println!("Loading extension from: {}", path);
+    // Opt-in verbose event logging via `EMPORIUM_REPL_VERBOSE=1`. Default is
+    // silent so per-tool-call progress events don't clutter the REPL.
+    let verbose = std::env::var("EMPORIUM_REPL_VERBOSE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
 
-    let config = serde_json::json!({});
-    let mut ext = Extension::load(&path, config).await?;
+    println!("Loading extension from: {path}");
+    if verbose {
+        println!("(verbose event logging enabled)\n");
+    }
+
+    // Shared host-data registry. The same Arc-backed handle is handed to the
+    // extension worker and retained here in the REPL, so `sync-keys` writes
+    // become visible to the extension's cursor reads.
+    let registry = DataRegistry::new();
+    registry.register(KV_KEYS_RESOURCE, kv_keys_schema(), Vec::new());
+
+    let ext = Extension::load_with_data(&path, json!({}), registry.clone()).await?;
 
     println!("Loaded: {} v{}", ext.id(), ext.version());
-    println!("{}\n", ext.manifest().description);
-    println!("Commands: get <key>, set <key> <value>, delete <key>, list, clear, stats, quit\n");
+    println!("{}\n", ext.description());
+    println!(
+        "Commands: get <key>, set <key> <value>, delete <key>, list, clear, stats, tools, view,\n\
+         block-types, block-create <prefix>..., block-add <prefix>, block-rename <old> <new>,\n\
+         block-query, sync-keys, analyze, add-analyze <prefix>,\n\
+         formulas, formula <name> [args...], help, quit\n"
+    );
 
-    // Take the event stream
-    let mut events = ext.events().expect("events() can only be called once");
+    // Bind the block provider once. The kv-extension advertises the
+    // `block-extension` world, so this should always be `Some` at startup.
+    let block_provider = ext.block().ok_or("extension does not export a block provider")?;
+
+    // Bind the formula provider once. The kv-extension advertises the
+    // `rich-extension` world, so this should always be `Some` at startup.
+    let formula_provider = ext.formula().ok_or("extension does not export a formula provider")?;
+
+    // Drain the host-events broadcast stream in the background. The channel is
+    // always drained (so subscribers don't lag), but events are only printed
+    // when `EMPORIUM_REPL_VERBOSE=1`.
+    let events = ext.events();
+    tokio::spawn(drain_events(events, verbose));
+
+    // Block-provider state tracked across block-* commands. `None` until the
+    // user runs `block-create`.
+    let mut block_state: Option<String> = None;
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();
@@ -68,7 +127,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         let parts: Vec<&str> = line.splitn(3, ' ').collect();
         let cmd_str = parts[0].to_lowercase();
 
-        let command = match cmd_str.as_str() {
+        match cmd_str.as_str() {
             "quit" | "exit" | "q" => {
                 println!("Goodbye!");
                 break;
@@ -78,127 +137,543 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     println!("Usage: get <key>");
                     continue;
                 }
-                Command::ExecuteTool {
-                    name: "get".to_string(),
-                    params: serde_json::json!({ "key": parts[1] }),
-                    correlation_id: None,
-                }
+                dispatch_tool(&ext, "get", json!({ "key": parts[1] })).await;
             }
             "set" => {
                 if parts.len() < 3 {
                     println!("Usage: set <key> <value>");
                     continue;
                 }
-                Command::ExecuteTool {
-                    name: "set".to_string(),
-                    params: serde_json::json!({ "key": parts[1], "value": parts[2] }),
-                    correlation_id: None,
-                }
+                dispatch_tool(&ext, "set", json!({ "key": parts[1], "value": parts[2] })).await;
+                sync_keys_silent(&ext, &registry).await;
             }
             "delete" | "del" => {
                 if parts.len() < 2 {
                     println!("Usage: delete <key>");
                     continue;
                 }
-                Command::ExecuteTool {
-                    name: "delete".to_string(),
-                    params: serde_json::json!({ "key": parts[1] }),
-                    correlation_id: None,
-                }
+                dispatch_tool(&ext, "delete", json!({ "key": parts[1] })).await;
+                sync_keys_silent(&ext, &registry).await;
             }
-            "list" | "keys" | "all" => Command::ExecuteTool {
-                name: "get_all".to_string(),
-                params: serde_json::json!({}),
-                correlation_id: None,
+            "list" | "keys" | "all" => dispatch_tool(&ext, "get_all", json!({})).await,
+            "clear" => {
+                dispatch_tool(&ext, "clear", json!({})).await;
+                sync_keys_silent(&ext, &registry).await;
+            }
+            "stats" => dispatch_tool(&ext, "stats", json!({})).await,
+            "tools" => match ext.list_tools().await {
+                Ok(tools) => {
+                    println!("Available tools:");
+                    for info in tools {
+                        println!("  {} - {}", info.name, info.description);
+                    }
+                }
+                Err(err) => println!("Error listing tools: {err}"),
             },
-            "clear" => Command::ExecuteTool {
-                name: "clear".to_string(),
-                params: serde_json::json!({}),
-                correlation_id: None,
+            "view" => match ext.view().await {
+                Ok(rendered) => println!("{rendered}"),
+                Err(err) => println!("Error rendering view: {err}"),
             },
-            "stats" => Command::ExecuteTool {
-                name: "stats".to_string(),
-                params: serde_json::json!({}),
-                correlation_id: None,
-            },
-            "tools" => Command::ListTools { correlation_id: None },
+            "block-types" => list_block_types(&block_provider).await,
+            "block-create" => {
+                // Collect all whitespace-separated prefixes after the command.
+                let prefixes: Vec<String> = line.split_whitespace().skip(1).map(str::to_string).collect();
+                block_create(&block_provider, &prefixes, &mut block_state).await;
+            }
+            "block-add" => {
+                if parts.len() < 2 {
+                    println!("Usage: block-add <prefix>");
+                    continue;
+                }
+                block_add(&block_provider, parts[1], &mut block_state).await;
+            }
+            "block-rename" => {
+                // parts[2] may contain trailing whitespace if the user typed
+                // more than three tokens; take only the first whitespace-
+                // separated chunk as `new`.
+                if parts.len() < 3 {
+                    println!("Usage: block-rename <old> <new>");
+                    continue;
+                }
+                let new = parts[2].split_whitespace().next().unwrap_or("");
+                if new.is_empty() {
+                    println!("Usage: block-rename <old> <new>");
+                    continue;
+                }
+                block_rename(&ext, &block_provider, parts[1], new, &mut block_state).await;
+            }
+            "block-query" => block_query(&ext, &block_provider, &block_state).await,
+            "sync-keys" => sync_keys(&ext, &registry).await,
+            "analyze" => block_analyze(&block_provider, &block_state).await,
+            "add-analyze" => {
+                if parts.len() < 2 {
+                    println!("Usage: add-analyze <prefix>");
+                    continue;
+                }
+                let prefix = parts[1].split_whitespace().next().unwrap_or("");
+                if prefix.is_empty() {
+                    println!("Usage: add-analyze <prefix>");
+                    continue;
+                }
+                block_add_analyze(&block_provider, prefix, &mut block_state).await;
+            }
+            "formulas" => list_formulas(&formula_provider).await,
+            "formula" => {
+                // Collect the formula name plus any positional arguments, all
+                // whitespace-separated after the command.
+                let mut tokens = line.split_whitespace().skip(1);
+                let Some(name) = tokens.next() else {
+                    println!("Usage: formula <name> [args...]");
+                    continue;
+                };
+                let args: Vec<String> = tokens.map(str::to_string).collect();
+                evaluate_formula(&formula_provider, name, &args).await;
+            }
             "help" | "?" => {
                 println!("Commands:");
-                println!("  get <key>           - Get a value");
-                println!("  set <key> <value>   - Set a value");
-                println!("  delete <key>        - Delete a key");
-                println!("  list                - List all keys");
-                println!("  clear               - Clear all keys");
-                println!("  stats               - Show store statistics");
-                println!("  tools               - List available tools");
-                println!("  quit                - Exit the REPL");
-                continue;
+                println!("  get <key>                     - Get a value");
+                println!("  set <key> <value>             - Set a value");
+                println!("  delete <key>                  - Delete a key");
+                println!("  list                          - List all keys");
+                println!("  clear                         - Clear all keys");
+                println!("  stats                         - Show store statistics");
+                println!("  tools                         - List available tools");
+                println!("  view                          - Print the extension's rendered view");
+                println!("  block-types                   - List block kinds advertised by the extension");
+                println!("  block-create <prefix>...      - Create a prefix-tracker block");
+                println!("  block-add <prefix>            - Add a prefix to the current block state");
+                println!("  block-rename <old> <new>      - Rename a prefix and re-query matching keys");
+                println!("  block-query                   - Run the current block's query plan");
+                println!("  sync-keys                     - Mirror KV keys into the kv-keys host-data resource");
+                println!("  analyze                       - Run prefix-tracker compute over kv-keys");
+                println!("  add-analyze <prefix>          - Add prefix and re-analyze in one step");
+                println!("  formulas                      - List formulas advertised by the extension");
+                println!("  formula <name> [args...]      - Evaluate a formula with positional args");
+                println!("  quit                          - Exit the REPL");
             }
             _ => {
-                println!("Unknown command: {}. Type 'help' for available commands.", cmd_str);
-                continue;
+                println!("Unknown command: {cmd_str}. Type 'help' for available commands.");
             }
-        };
-
-        // Send the command
-        ext.send(command)?;
-
-        // Wait for response with timeout
-        let response = tokio::time::timeout(std::time::Duration::from_secs(5), wait_for_response(&mut events)).await;
-
-        match response {
-            Ok(Some(resp)) => print_response(resp),
-            Ok(None) => println!("Extension closed"),
-            Err(_) => println!("Timeout waiting for response"),
         }
     }
 
     Ok(())
 }
 
-async fn wait_for_response(events: &mut (impl StreamExt<Item = Event> + Unpin)) -> Option<Response> {
-    while let Some(event) = events.next().await {
-        if let Event::Core(response) = event {
-            return Some(response);
-        }
+/// Execute a tool with the given parameters, print the output, and keep
+/// the REPL running on errors.
+async fn dispatch_tool(ext: &Extension, name: &str, params: serde_json::Value) {
+    let call = tokio::time::timeout(TOOL_TIMEOUT, ext.execute_tool(name, params)).await;
+    match call {
+        Ok(Ok(output)) => print_output(output),
+        Ok(Err(err)) => println!("Error from '{name}': {err}"),
+        Err(_) => println!("Timeout waiting for '{name}' response"),
     }
-    None
 }
 
-fn print_response(response: Response) {
-    match response {
-        Response::ToolList { tools, .. } => {
-            println!("Available tools:");
-            for tool in tools {
-                println!("  {} - {}", tool.name, tool.description);
+/// Pretty-print a tool output — collapses null/empty text to "OK" to match the
+/// REPL's prior behaviour.
+fn print_output(output: tool::Output) {
+    match output {
+        tool::Output::Text(text) => {
+            if text.content == "null" || text.content.is_empty() {
+                println!("OK");
+            } else {
+                println!("{}", text.content);
             }
         }
-        Response::ToolResult { name, result, .. } => match result {
-            Ok(r) => {
-                use emporium::data::core::tool::ToolResult;
-                match r {
-                    ToolResult::Text(text) => {
-                        if text.content == "null" || text.content.is_empty() {
-                            println!("OK");
-                        } else {
-                            println!("{}", text.content);
-                        }
-                    }
-                    ToolResult::DataFrame(df) => {
-                        println!("DataFrame with {} columns", df.schema.len());
-                    }
+        tool::Output::DataFrame(df) => {
+            println!("DataFrame with {} columns", df.schema.len());
+        }
+        other => {
+            let _ = other;
+            println!("(unrecognized output variant)");
+        }
+    }
+}
+
+/// Background task that drains `host-events` broadcasts.
+///
+/// Events are dropped on the floor unless `verbose` is set — the REPL's
+/// `notify_progress` emission fires per tool call, which is noisy for
+/// interactive use. A proper `host-logs` WIT interface (level/target/fields,
+/// routed through the host's tracing subscriber) is future work. For now
+/// this lets users opt in via `EMPORIUM_REPL_VERBOSE=1`.
+async fn drain_events(mut events: tokio::sync::broadcast::Receiver<emporium_core::event::Event>, verbose: bool) {
+    loop {
+        match events.recv().await {
+            Ok(event) => {
+                if verbose {
+                    let description = describe_event(&event);
+                    println!("[event] {description}");
                 }
             }
-            Err(e) => println!("Error from '{}': {}", name, e),
+            Err(RecvError::Lagged(n)) => {
+                if verbose {
+                    println!("[event] (lagged; dropped {n} events)");
+                }
+            }
+            Err(RecvError::Closed) => return,
+        }
+    }
+}
+
+/// One-line description of a host-events notification for REPL display.
+fn describe_event(event: &emporium_core::event::Event) -> String {
+    use emporium_core::event::{Event, Invalidate};
+    match event {
+        Event::Progress(p) => match p.percent {
+            Some(pct) => format!("progress {pct}%: {}", p.message),
+            None => format!("progress: {}", p.message),
         },
-        Response::Error { message, .. } => {
-            println!("Error: {}", message);
+        Event::ToolsChanged => "tools-changed".to_string(),
+        Event::Invalidate(Invalidate::Resource(id)) => format!("invalidate resource: {id}"),
+        Event::Invalidate(Invalidate::Tool(name)) => format!("invalidate tool: {name}"),
+        Event::Invalidate(Invalidate::All) => "invalidate all".to_string(),
+        other => {
+            let _ = other;
+            "(unrecognized event)".to_string()
         }
-        Response::Metadata { name, version, .. } => {
-            println!("Extension: {} v{}", name, version);
+    }
+}
+
+/// Kind identifier for the block type the kv-extension advertises.
+const PREFIX_TRACKER_KIND: &str = "prefix-tracker";
+
+/// Message printed when a block-* command runs before `block-create`.
+const BLOCK_MISSING_HINT: &str = "No block created. Run 'block-create <prefix> ...' first.";
+
+/// List and print the block types the extension advertises.
+async fn list_block_types(provider: &block::Provider) {
+    match provider.types().await {
+        Ok(types) if types.is_empty() => println!("(no block types)"),
+        Ok(types) => {
+            println!("Block types:");
+            for info in types {
+                println!("  {}: {} - {}", info.kind, info.name, info.description);
+            }
         }
-        Response::ToolDetails { tool_info, .. } => {
-            println!("{}: {}", tool_info.name, tool_info.description);
+        Err(err) => println!("Error listing block types: {err}"),
+    }
+}
+
+/// Create a prefix-tracker block from the supplied prefix list and stash
+/// the returned state JSON in `block_state`.
+async fn block_create(provider: &block::Provider, prefixes: &[String], block_state: &mut Option<String>) {
+    if prefixes.is_empty() {
+        println!("Warning: creating block with empty prefix list (no keys will match).");
+    }
+    let input = json!({ "prefixes": prefixes });
+    match provider.create(PREFIX_TRACKER_KIND, input).await {
+        Ok(state) => {
+            println!("Block created. State: {state}");
+            *block_state = Some(state);
+        }
+        Err(err) => println!("Error creating block: {err}"),
+    }
+}
+
+/// Run the `add_prefix` block operation, updating `block_state` on success.
+async fn block_add(provider: &block::Provider, prefix: &str, block_state: &mut Option<String>) {
+    let Some(state) = block_state.as_deref() else {
+        println!("{BLOCK_MISSING_HINT}");
+        return;
+    };
+    let input = json!({ "prefix": prefix });
+    match provider.plan(PREFIX_TRACKER_KIND, state, "add_prefix", input).await {
+        Ok(plan::Outcome::StateUpdate(new_state)) => {
+            println!("Updated state: {new_state}");
+            *block_state = Some(new_state);
+        }
+        Ok(other) => {
+            let _ = other;
+            println!("Warning: expected StateUpdate from add_prefix, got a different outcome.");
+        }
+        Err(err) => println!("Error running add_prefix: {err}"),
+    }
+}
+
+/// Run the `rename_prefix` block operation, update state, then execute the
+/// follow-up query plan against the KV store.
+async fn block_rename(
+    ext: &Extension,
+    provider: &block::Provider,
+    old: &str,
+    new: &str,
+    block_state: &mut Option<String>,
+) {
+    let Some(state) = block_state.as_deref() else {
+        println!("{BLOCK_MISSING_HINT}");
+        return;
+    };
+    let input = json!({ "old": old, "new": new });
+    match provider.plan(PREFIX_TRACKER_KIND, state, "rename_prefix", input).await {
+        Ok(plan::Outcome::StateUpdateWithQuery(new_state, plan_json)) => {
+            println!("Updated state: {new_state}");
+            *block_state = Some(new_state);
+            println!("Rename plan executed:");
+            run_toy_plan(ext, &plan_json).await;
+        }
+        Ok(other) => {
+            let _ = other;
+            println!("Warning: expected StateUpdateWithQuery from rename_prefix, got a different outcome.");
+        }
+        Err(err) => println!("Error running rename_prefix: {err}"),
+    }
+}
+
+/// Run the `query` block operation and execute the returned plan.
+async fn block_query(ext: &Extension, provider: &block::Provider, block_state: &Option<String>) {
+    let Some(state) = block_state.as_deref() else {
+        println!("{BLOCK_MISSING_HINT}");
+        return;
+    };
+    match provider.plan(PREFIX_TRACKER_KIND, state, "query", json!({})).await {
+        Ok(plan::Outcome::Query(plan_json)) => {
+            println!("Query plan matched:");
+            run_toy_plan(ext, &plan_json).await;
+        }
+        Ok(other) => {
+            let _ = other;
+            println!("Warning: expected Query from query, got a different outcome.");
+        }
+        Err(err) => println!("Error running query: {err}"),
+    }
+}
+
+/// Toy plan executor: resolves `kv-keys` by calling `list_keys` and filters
+/// rows whose `key` field starts with any prefix in
+/// `filter.key_starts_with_any`. This is a demonstration, not a general
+/// plan engine — it only understands the one plan shape kv-repl emits.
+async fn run_toy_plan(ext: &Extension, plan_json: &str) {
+    let plan: serde_json::Value = match serde_json::from_str(plan_json) {
+        Ok(value) => value,
+        Err(err) => {
+            println!("Error parsing plan JSON: {err}");
+            return;
+        }
+    };
+
+    let resource = plan.get("resource").and_then(|v| v.as_str()).unwrap_or("");
+    if resource != "kv-keys" {
+        println!("Unknown resource: {resource}");
+        return;
+    }
+
+    let output = match ext.execute_tool("list_keys", json!({})).await {
+        Ok(output) => output,
+        Err(err) => {
+            println!("Error running list_keys: {err}");
+            return;
+        }
+    };
+
+    let df = match output {
+        tool::Output::DataFrame(df) => df,
+        other => {
+            let _ = other;
+            println!("Unexpected list_keys output variant");
+            return;
+        }
+    };
+
+    let rows = match df.data.as_array() {
+        Some(rows) => rows,
+        None => {
+            println!("Unexpected list_keys data shape (expected JSON array)");
+            return;
+        }
+    };
+    let keys: Vec<&str> = rows
+        .iter()
+        .filter_map(|row| row.get("key").and_then(|v| v.as_str()))
+        .collect();
+
+    let prefixes = match plan.get("filter").and_then(|f| f.get("key_starts_with_any")) {
+        Some(serde_json::Value::Array(items)) => {
+            let parsed: Vec<&str> = items.iter().filter_map(|item| item.as_str()).collect();
+            if parsed.len() != items.len() {
+                println!("Warning: non-string entries in key_starts_with_any were ignored.");
+            }
+            parsed
+        }
+        _ => {
+            println!("No filter applied. Plan: {plan_json}");
+            return;
+        }
+    };
+
+    let matches: Vec<&str> = keys
+        .into_iter()
+        .filter(|key| prefixes.iter().any(|prefix| key.starts_with(prefix)))
+        .collect();
+
+    if matches.is_empty() {
+        println!("(no matching keys)");
+    } else {
+        for key in matches {
+            println!("{key}");
+        }
+    }
+}
+
+/// List the formulas the extension advertises, printing each as
+/// `"{name}: {description}"`.
+async fn list_formulas(provider: &formula::Provider) {
+    match provider.defs().await {
+        Ok(defs) if defs.is_empty() => println!("(no formulas)"),
+        Ok(defs) => {
+            println!("Formulas:");
+            for def in defs {
+                println!("  {}: {}", def.name, def.description);
+            }
+        }
+        Err(err) => println!("Error listing formulas: {err}"),
+    }
+}
+
+/// Evaluate a named formula with positional string arguments. The returned
+/// JSON-encoded result is printed literally (no quote stripping).
+async fn evaluate_formula(provider: &formula::Provider, name: &str, args: &[String]) {
+    let args_value = json!(args);
+    match provider.evaluate(name, args_value).await {
+        Ok(result) => println!("{result}"),
+        Err(err) => println!("Error evaluating formula: {err}"),
+    }
+}
+
+/// Stable identifier for the host-data resource the prefix-tracker block
+/// analyzes via a cursor.
+const KV_KEYS_RESOURCE: &str = "kv-keys";
+
+/// Schema of the `kv-keys` host-data resource: one row per key, with a single
+/// `key` column. Matches what the kv-extension's `analyze_keys` expects.
+fn kv_keys_schema() -> Vec<column::Def> {
+    vec![column::Def {
+        name: "key".to_string(),
+        alias: "Key".to_string(),
+        dtype: "string".to_string(),
+    }]
+}
+
+/// Mirror the KV store's current keys into the shared host-data `kv-keys`
+/// resource. Calls `list_keys`, pulls the `DataFrame` rows, and re-registers
+/// them under the same id so the extension's cursor sees the updated data.
+async fn sync_keys(ext: &Extension, registry: &DataRegistry) {
+    let count = sync_keys_silent(ext, registry).await;
+    if let Some(n) = count {
+        println!("Synced {n} keys to kv-keys resource");
+    }
+}
+
+/// Core sync logic shared by the explicit `sync-keys` command and the
+/// automatic post-mutation sync. Returns `Some(row_count)` on success,
+/// `None` on failure (errors are printed inline).
+async fn sync_keys_silent(ext: &Extension, registry: &DataRegistry) -> Option<usize> {
+    let output = match ext.execute_tool("list_keys", json!({})).await {
+        Ok(output) => output,
+        Err(err) => {
+            println!("Error running list_keys: {err}");
+            return None;
+        }
+    };
+
+    let df = match output {
+        tool::Output::DataFrame(df) => df,
+        other => {
+            let _ = other;
+            println!("Unexpected list_keys output variant (expected DataFrame)");
+            return None;
+        }
+    };
+
+    let rows: Vec<serde_json::Value> = match df.data.as_array() {
+        Some(rows) => rows.clone(),
+        None => {
+            println!("Unexpected list_keys data shape (expected JSON array)");
+            return None;
+        }
+    };
+
+    let count = rows.len();
+    registry.register(KV_KEYS_RESOURCE, kv_keys_schema(), rows);
+    Some(count)
+}
+
+/// Run the `analyze` block operation and print the resulting character
+/// frequency map. Expects `Outcome::Computed(freq_json)`.
+async fn block_analyze(provider: &block::Provider, block_state: &Option<String>) {
+    let Some(state) = block_state.as_deref() else {
+        println!("{BLOCK_MISSING_HINT}");
+        return;
+    };
+    match provider.plan(PREFIX_TRACKER_KIND, state, "analyze", json!({})).await {
+        Ok(plan::Outcome::Computed(freq_json)) => print_frequencies(&freq_json),
+        Ok(other) => {
+            let _ = other;
+            println!("Warning: expected Computed from analyze, got a different outcome.");
+        }
+        Err(err) => println!("Error running analyze: {err}"),
+    }
+}
+
+/// Run the `add_and_analyze` block operation, update local state, and print
+/// the resulting character frequency map. Expects
+/// `Outcome::StateUpdateWithComputed(new_state, freq_json)`.
+async fn block_add_analyze(provider: &block::Provider, prefix: &str, block_state: &mut Option<String>) {
+    let Some(state) = block_state.as_deref() else {
+        println!("{BLOCK_MISSING_HINT}");
+        return;
+    };
+    let input = json!({ "prefix": prefix });
+    match provider
+        .plan(PREFIX_TRACKER_KIND, state, "add_and_analyze", input)
+        .await
+    {
+        Ok(plan::Outcome::StateUpdateWithComputed(new_state, freq_json)) => {
+            print_frequencies(&freq_json);
+            println!("Updated state: {new_state}");
+            *block_state = Some(new_state);
+        }
+        Ok(other) => {
+            let _ = other;
+            println!("Warning: expected StateUpdateWithComputed from add_and_analyze, got a different outcome.");
+        }
+        Err(err) => println!("Error running add_and_analyze: {err}"),
+    }
+}
+
+/// Parse a `BTreeMap<char, u32>`-shaped JSON object and print its entries
+/// in sorted order, one per line as `  'c': N`.
+fn print_frequencies(freq_json: &str) {
+    let value: serde_json::Value = match serde_json::from_str(freq_json) {
+        Ok(value) => value,
+        Err(err) => {
+            println!("Error parsing frequencies JSON: {err}");
+            return;
+        }
+    };
+    let map = match value.as_object() {
+        Some(map) => map,
+        None => {
+            println!("Unexpected frequencies shape (expected JSON object): {freq_json}");
+            return;
+        }
+    };
+
+    println!("Character frequencies:");
+    if map.is_empty() {
+        println!("  (none)");
+        return;
+    }
+    // BTreeMap serialization is already sorted by key, but re-sort to be
+    // defensive in case the JSON object order ever drifts.
+    let mut entries: Vec<(&String, &serde_json::Value)> = map.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    for (ch, count) in entries {
+        match count.as_u64() {
+            Some(n) => println!("  '{ch}': {n}"),
+            None => println!("  '{ch}': (non-numeric count: {count})"),
         }
     }
 }

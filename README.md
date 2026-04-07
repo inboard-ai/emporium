@@ -1,116 +1,147 @@
-<div align="center">
-
 # emporium
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/inboard-ai/emporium/blob/main/LICENSE)
 
-WASM extension framework for Rust applications
+WASM extension framework for Rust. A host application loads extensions as WASM components, exposing their tools, blocks, and formulas to an AI agent through typed WIT interfaces.
 
-</div>
+## Architecture
 
-## Quick Start
+Extensions are WASM components that export one or more provider interfaces defined in `wit/extension.wit`. The host loads a `.empkg` package (gzipped tarball containing `manifest.toml` + compiled WASM), instantiates the component via wasmtime, and communicates through strongly-typed WIT bindings -- no string-serialized command/response protocol.
+
+### WIT interfaces
+
+**Exported by the extension (extension -> host):**
+
+| Interface | Purpose |
+|-----------|---------|
+| `types` | Shared record types (`column-def`) used across interfaces |
+| `extension` | Identity and lifecycle: `get-metadata`, `init`, `view` |
+| `tool-provider` | Data tools: `list-tools`, `execute-tool` returning text or DataFrame outputs |
+| `block-provider` | Stateful block types with operations: `create`, `plan`, `validate` |
+| `formula-provider` | Spreadsheet-style formulas: `get-formulas`, `evaluate` |
+
+**Imported by the extension (host -> extension):**
+
+| Interface | Purpose |
+|-----------|---------|
+| `host-data` | Cursor-based streaming access to host-managed resources (`cursor.open`, `next-batch`, `get-schema`, `row-count`) |
+| `host-events` | Push notifications from extension to host: progress, invalidation, tools-changed |
+
+### Worlds (additive tiers)
+
+Each world includes the previous, so an extension picks the tier matching its capabilities:
+
+| World | Exports | Imports |
+|-------|---------|---------|
+| `tool-extension` | `extension` + `tool-provider` | `host-events` |
+| `block-extension` | + `block-provider` | |
+| `rich-extension` | + `formula-provider` | |
+| `full-extension` | (all of the above) | + `host-data` |
+
+## Workspace structure
+
+| Crate | Path | Description |
+|-------|------|-------------|
+| `emporium` | `.` | Host runtime -- loads `.empkg` packages, manages wasmtime worker threads, provides the `Extension` API |
+| `emporium-core` | `core/` | Domain types: `tool::Info`, `tool::Output`, `block::TypeInfo`, `plan::Outcome`, `formula::Def`, `event::Event`, `column::Def` |
+| `emporium-types` | `types/` | Lightweight manifest types (`ManifestTool`) for downstream crates that don't need the full runtime |
+| `cargo-emporium` | `cli/` | CLI tool for building and packaging extensions (`cargo emporium build`, `package`, `validate`, `check`) |
+| `kv-extension` | `examples/kv-repl/extension/` | Example WASM extension: in-memory key-value store implementing `full-extension` |
+| `kv-repl` | `examples/kv-repl/` | Example REPL host that loads the kv-extension and exercises all provider interfaces |
+
+## Quick start
 
 ```rust
-use emporium::{Extension, Command, Event};
-use futures::StreamExt;
+use emporium::Extension;
+use serde_json::json;
 
-// Load an extension
-let mut ext = Extension::load("sql-0.1.0.empkg", config).await?;
+let ext = Extension::load("my-extension-0.1.0.empkg", json!({})).await?;
 
-// Send a command
-ext.send(Command::ListTools { correlation_id: None })?;
+// List tools
+let tools = ext.list_tools().await?;
 
-// Process events
-let mut events = ext.events().unwrap();
-while let Some(event) = events.next().await {
-    match event {
-        Event::Response(response) => { /* handle response */ }
-        Event::Log { level, message } => { /* extension log output */ }
-    }
+// Execute a tool
+let output = ext.execute_tool("set", json!({"key": "a", "value": "1"})).await?;
+
+// Access block and formula providers (if the extension exports them)
+if let Some(block) = ext.block() {
+    let types = block.types().await?;
+}
+if let Some(formula) = ext.formula() {
+    let defs = formula.defs().await?;
 }
 ```
 
-## Extension API
+The `Extension` type is `Send + Sync + Clone` -- clones share the same worker thread via an `mpsc` channel, and the thread exits when the last clone drops.
 
-| Method | Description |
-|--------|-------------|
-| `Extension::load(path, config)` | Load from a `.empkg` file |
-| `Extension::from_bytes(bytes, config)` | Load from package bytes |
-| `ext.manifest()` | Get full manifest (id, name, version, tools, config_schema, etc.) |
-| `ext.id()` / `ext.version()` | Quick accessors |
-| `ext.config()` / `ext.set_config(config)` | Read/write extension settings |
-| `ext.send(command)` | Send a command to the extension |
-| `ext.sender()` | Get a cloneable command sender |
-| `ext.events()` | Get the event stream (can only be called once) |
-
-## Commands and Responses
-
-Commands sent to extensions:
+For host-data cursor support, use `Extension::load_with_data` and provide a `DataRegistry`:
 
 ```rust
-Command::ListTools { correlation_id }
-Command::GetToolDetails { tool_id, correlation_id }
-Command::ExecuteTool { name, params, correlation_id }
-Command::Custom { command, correlation_id }
+use emporium::host_data::DataRegistry;
+
+let registry = DataRegistry::new();
+registry.register("resource-id", schema, rows);
+let ext = Extension::load_with_data("ext.empkg", json!({}), registry).await?;
 ```
 
-Responses from extensions:
+## Manifest v2 and tool discovery
 
-```rust
-Response::ToolList { tools, correlation_id }
-Response::ToolDetails { tool_id, tool_info, correlation_id }
-Response::ToolResult { name, result: Result<ToolResult, _>, correlation_id }
-Response::Error { message, correlation_id }
-```
+Extensions declare their capabilities in `manifest.toml`. As of Phase 8, the
+manifest requires two additional fields for AI-agent-driven tool discovery:
 
-Tool results are either `ToolResult::Text` or `ToolResult::DataFrame`, each with optional `label`, `source` (e.g. the SQL query that produced it), and a per-result `store` flag to override the tool's `cacheable` default.
+- **`overview`** (extension-level) — an LLM-facing description of the
+  extension's capabilities, written to be keyword-dense and specific.
+- **`schema`** (per tool) — a JSON Schema string describing each tool's
+  parameters.
 
-## Creating Extensions
+Optional but recommended fields include `topics` (searchable tags),
+`examples` (sample inputs), `primary` (include tool in the LLM system
+prompt), `cacheable`, and `activity` (display hints).
 
-Extensions are WASM components that implement the extension WIT interface. See [`core/README.md`](core/README.md) for the full guide.
+The host exposes a `SearchIndex` (in `src/discovery.rs`) that indexes all
+loaded extensions and supports fuzzy tool search via a `search_tools`
+meta-tool. Non-primary tools are discovered through this search rather than
+being listed upfront.
 
-1. Create a Rust library with `crate-type = ["cdylib"]`
-2. Implement the extension interface using `wit-bindgen`
-3. Build with `cargo emporium build`
-4. Package with `cargo emporium package`
+Run `cargo emporium validate` to check that your manifest conforms to v2.
+See [`docs/EXTENSION_MIGRATION_GUIDE.md`](docs/EXTENSION_MIGRATION_GUIDE.md)
+for the full field reference and migration checklist.
 
-## Packaging
+## Running the example
 
-Install the CLI:
+The `kv-repl` example builds the `kv-extension` WASM component automatically via its `build.rs` and loads it into a REPL host:
 
 ```bash
-cargo install --path cli
+cargo run -p kv-repl
 ```
 
-Build and package an extension:
+Enable verbose event logging:
 
 ```bash
-cargo emporium build              # compile to WASM
-cargo emporium package            # create .empkg archive
-cargo emporium validate           # check manifest + WASM
-cargo emporium check -r <url>     # check if version exists in registry
+EMPORIUM_REPL_VERBOSE=1 cargo run -p kv-repl
 ```
 
-The `.empkg` format is a gzipped tarball containing `manifest.toml`, the WASM binary, and optional README/icon/license files.
+See [`examples/kv-repl/README.md`](examples/kv-repl/README.md) for details.
 
-## Serving Extensions
+## Development
 
-Extensions are served by [shopkeep](https://github.com/inboard-ai/shopkeep), a Cloudflare Worker backed by R2. Publish with the `cargo-shopkeep` CLI:
+Run the full test suite:
 
 ```bash
-cargo shopkeep publish --registry https://extensions.inboard.ai
+cargo test --workspace
 ```
 
-See the [shopkeep repo](https://github.com/inboard-ai/shopkeep) for the full registry API and CLI docs.
+Lint:
 
-## Crates
+```bash
+cargo clippy --workspace --all-targets
+```
 
-| Crate | Description |
-|-------|-------------|
-| `emporium` | Main library — load extensions, send commands, receive events |
-| `emporium-core` | Shared types — `Command`, `Response`, `ToolResult`, `ToolInfo` |
-| `emporium-types` | Lightweight types for downstream crates (`ManifestTool`) |
-| `cargo-emporium` | CLI — build, package, validate, check |
+Format:
+
+```bash
+cargo fmt --all
+```
 
 ## License
 
