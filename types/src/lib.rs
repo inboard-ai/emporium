@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 
 /// Static tool declaration for manifests and registries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct ManifestTool {
     pub id: String,
     pub name: String,
@@ -24,6 +26,8 @@ pub struct ManifestTool {
 
 /// Display hints for live/completed status of a tool in manifests.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct ManifestActivity {
     pub present: String,
     pub past: String,
