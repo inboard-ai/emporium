@@ -3,6 +3,8 @@
 use super::Label;
 use crate::{Error, column};
 use polars_core::prelude::*;
+use polars_io::ipc::{IpcReader, IpcWriter};
+use polars_io::{SerReader, SerWriter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -60,259 +62,303 @@ impl DataFrame {
         }
     }
 
-    /// Convert to a polars DataFrame.
+    /// Convert to a polars DataFrame. Thin delegate over [`build_polars`] so the
+    /// same JSON→polars logic backs both this accessor and [`to_arrow_ipc`].
     pub fn to_dataframe(self) -> Result<polars_core::frame::DataFrame, Error> {
-        // Helper to convert string dtype to Polars DataType
-        fn to_dtype(dtype: &str) -> DataType {
-            match dtype {
-                "string" => DataType::String,
-                "number" | "float" => DataType::Float64,
-                "integer" | "int" => DataType::Int64,
-                "boolean" | "bool" => DataType::Boolean,
-                "date" => DataType::Date,
-                "datetime" => DataType::Datetime(TimeUnit::Milliseconds, None),
-                _ => DataType::String, // Default to string for unknown types
-            }
-        }
+        build_polars(&self.schema, &self.data)
+    }
+}
 
-        // Helper to parse a value as f64, handling both number and string representations
-        fn parse_as_f64(value: &serde_json::Value) -> Option<f64> {
-            match value {
-                serde_json::Value::Number(n) => n.as_f64(),
-                serde_json::Value::String(s) => s.parse::<f64>().ok(),
+// ---------------------------------------------------------------------------
+// JSON → polars (the legacy decode path, now shared)
+// ---------------------------------------------------------------------------
+
+/// Build a polars DataFrame from a column schema + JSON data value. Accepts
+/// row-oriented (`[{col: val, …}, …]`) or column-oriented (`{col: [val, …]}`)
+/// shapes. Shared by [`DataFrame::to_dataframe`] and [`to_arrow_ipc`].
+fn build_polars(schema: &[column::Def], data: &Value) -> Result<polars_core::frame::DataFrame, Error> {
+    // Helper to convert string dtype to Polars DataType
+    fn to_dtype(dtype: &str) -> DataType {
+        match dtype {
+            "string" => DataType::String,
+            "number" | "float" => DataType::Float64,
+            "integer" | "int" => DataType::Int64,
+            "boolean" | "bool" => DataType::Boolean,
+            "date" => DataType::Date,
+            "datetime" => DataType::Datetime(TimeUnit::Milliseconds, None),
+            _ => DataType::String, // Default to string for unknown types
+        }
+    }
+
+    // Helper to parse a value as f64, handling both number and string representations
+    fn parse_as_f64(value: &serde_json::Value) -> Option<f64> {
+        match value {
+            serde_json::Value::Number(n) => n.as_f64(),
+            serde_json::Value::String(s) => s.parse::<f64>().ok(),
+            _ => None,
+        }
+    }
+
+    // Helper to parse a value as i64, handling both number and string representations
+    fn parse_as_i64(value: &serde_json::Value) -> Option<i64> {
+        match value {
+            serde_json::Value::Number(n) => n.as_i64(),
+            serde_json::Value::String(s) => s.parse::<i64>().ok(),
+            _ => None,
+        }
+    }
+
+    // Helper to parse a value as bool, handling various representations
+    fn parse_as_bool(value: &serde_json::Value) -> Option<bool> {
+        match value {
+            serde_json::Value::Bool(b) => Some(*b),
+            serde_json::Value::String(s) => match s.to_lowercase().as_str() {
+                "true" | "1" | "yes" => Some(true),
+                "false" | "0" | "no" => Some(false),
                 _ => None,
-            }
+            },
+            serde_json::Value::Number(n) => n.as_i64().map(|i| i != 0),
+            _ => None,
         }
+    }
 
-        // Helper to parse a value as i64, handling both number and string representations
-        fn parse_as_i64(value: &serde_json::Value) -> Option<i64> {
-            match value {
-                serde_json::Value::Number(n) => n.as_i64(),
-                serde_json::Value::String(s) => s.parse::<i64>().ok(),
-                _ => None,
+    match data {
+        Value::Array(arr) => {
+            if arr.is_empty() {
+                return Ok(polars_core::frame::DataFrame::empty());
             }
-        }
 
-        // Helper to parse a value as bool, handling various representations
-        fn parse_as_bool(value: &serde_json::Value) -> Option<bool> {
-            match value {
-                serde_json::Value::Bool(b) => Some(*b),
-                serde_json::Value::String(s) => match s.to_lowercase().as_str() {
-                    "true" | "1" | "yes" => Some(true),
-                    "false" | "0" | "no" => Some(false),
-                    _ => None,
-                },
-                serde_json::Value::Number(n) => n.as_i64().map(|i| i != 0),
-                _ => None,
-            }
-        }
+            // Create Series for each column based on schema
+            let mut columns_vec = Vec::new();
 
-        match self.data {
-            Value::Array(arr) => {
-                if arr.is_empty() {
-                    return Ok(polars_core::frame::DataFrame::empty());
-                }
+            for col_def in schema {
+                let dtype = to_dtype(&col_def.dtype);
+                let alias = col_def.alias.clone().into();
 
-                // Create Series for each column based on schema
-                let mut columns_vec = Vec::new();
-
-                for col_def in &self.schema {
-                    let dtype = to_dtype(&col_def.dtype);
-                    let alias = col_def.alias.clone().into();
-
-                    let series = match dtype {
-                        DataType::String | DataType::Date => {
-                            let values: Vec<Option<String>> = arr
-                                .iter()
-                                .map(|item| {
-                                    item.get(&col_def.name).and_then(|v| match v {
-                                        serde_json::Value::String(s) => Some(s.clone()),
-                                        serde_json::Value::Null => None,
-                                        other => Some(other.to_string()),
-                                    })
+                let series = match dtype {
+                    DataType::String | DataType::Date => {
+                        let values: Vec<Option<String>> = arr
+                            .iter()
+                            .map(|item| {
+                                item.get(&col_def.name).and_then(|v| match v {
+                                    serde_json::Value::String(s) => Some(s.clone()),
+                                    serde_json::Value::Null => None,
+                                    other => Some(other.to_string()),
                                 })
-                                .collect();
-                            Series::new(alias, values)
+                            })
+                            .collect();
+                        Series::new(alias, values)
+                    }
+                    DataType::Float64 => {
+                        let values: Vec<Option<f64>> = arr
+                            .iter()
+                            .map(|item| item.get(&col_def.name).and_then(parse_as_f64))
+                            .collect();
+                        Series::new(alias, values)
+                    }
+                    DataType::Int64 => {
+                        let values: Vec<Option<i64>> = arr
+                            .iter()
+                            .map(|item| item.get(&col_def.name).and_then(parse_as_i64))
+                            .collect();
+                        Series::new(alias, values)
+                    }
+                    DataType::Boolean => {
+                        let values: Vec<Option<bool>> = arr
+                            .iter()
+                            .map(|item| item.get(&col_def.name).and_then(parse_as_bool))
+                            .collect();
+                        Series::new(alias, values)
+                    }
+                    _ => {
+                        // Default to string representation for other types
+                        let values: Vec<Option<String>> = arr
+                            .iter()
+                            .map(|item| {
+                                item.get(&col_def.name).and_then(|v| match v {
+                                    serde_json::Value::Null => None,
+                                    other => Some(other.to_string()),
+                                })
+                            })
+                            .collect();
+                        Series::new(alias, values)
+                    }
+                };
+                columns_vec.push(Column::Series(series.into()));
+            }
+
+            polars_core::frame::DataFrame::new(columns_vec)
+                .map_err(|e| Error::DataFrame(format!("Failed to create DataFrame: {}", e)))
+        }
+
+        Value::Object(obj) => {
+            // For object format, assume it's column-oriented data
+            // e.g., {"col1": [1,2,3], "col2": ["a","b","c"]}
+            let mut columns_vec = Vec::new();
+
+            // Track the maximum number of rows across all columns
+            let mut max_rows = 0usize;
+
+            for col_def in schema {
+                let alias = col_def.alias.clone().into();
+                let dtype = to_dtype(&col_def.dtype);
+
+                if let Some(col_data) = obj.get(&col_def.name) {
+                    let series = match col_data {
+                        Value::Array(values) => {
+                            max_rows = max_rows.max(values.len());
+
+                            match dtype {
+                                DataType::String | DataType::Date => {
+                                    let parsed: Vec<Option<String>> = values
+                                        .iter()
+                                        .map(|v| match v {
+                                            Value::Null => None,
+                                            Value::String(s) => Some(s.clone()),
+                                            other => Some(other.to_string()),
+                                        })
+                                        .collect();
+                                    Series::new(alias, parsed)
+                                }
+                                DataType::Float64 => {
+                                    let parsed: Vec<Option<f64>> = values.iter().map(parse_as_f64).collect();
+                                    Series::new(alias, parsed)
+                                }
+                                DataType::Int64 => {
+                                    let parsed: Vec<Option<i64>> = values.iter().map(parse_as_i64).collect();
+                                    Series::new(alias, parsed)
+                                }
+                                DataType::Boolean => {
+                                    let parsed: Vec<Option<bool>> = values.iter().map(parse_as_bool).collect();
+                                    Series::new(alias, parsed)
+                                }
+                                _ => {
+                                    // Default to string
+                                    let parsed: Vec<Option<String>> = values
+                                        .iter()
+                                        .map(|v| match v {
+                                            Value::Null => None,
+                                            Value::String(s) => Some(s.clone()),
+                                            other => Some(other.to_string()),
+                                        })
+                                        .collect();
+                                    Series::new(alias, parsed)
+                                }
+                            }
                         }
-                        DataType::Float64 => {
-                            let values: Vec<Option<f64>> = arr
-                                .iter()
-                                .map(|item| item.get(&col_def.name).and_then(parse_as_f64))
-                                .collect();
-                            Series::new(alias, values)
-                        }
-                        DataType::Int64 => {
-                            let values: Vec<Option<i64>> = arr
-                                .iter()
-                                .map(|item| item.get(&col_def.name).and_then(parse_as_i64))
-                                .collect();
-                            Series::new(alias, values)
-                        }
-                        DataType::Boolean => {
-                            let values: Vec<Option<bool>> = arr
-                                .iter()
-                                .map(|item| item.get(&col_def.name).and_then(parse_as_bool))
-                                .collect();
-                            Series::new(alias, values)
-                        }
+                        // If it's not an array, treat it as a single value repeated for all rows
+                        // This will be adjusted after we know the max_rows
                         _ => {
-                            // Default to string representation for other types
-                            let values: Vec<Option<String>> = arr
-                                .iter()
-                                .map(|item| {
-                                    item.get(&col_def.name).and_then(|v| match v {
-                                        serde_json::Value::Null => None,
+                            // For now, create a single-element series
+                            match dtype {
+                                DataType::String | DataType::Date => {
+                                    let value = match col_data {
+                                        Value::Null => None,
+                                        Value::String(s) => Some(s.clone()),
                                         other => Some(other.to_string()),
-                                    })
-                                })
-                                .collect();
-                            Series::new(alias, values)
+                                    };
+                                    Series::new(alias, vec![value])
+                                }
+                                DataType::Float64 => Series::new(alias, vec![parse_as_f64(col_data)]),
+                                DataType::Int64 => Series::new(alias, vec![parse_as_i64(col_data)]),
+                                DataType::Boolean => Series::new(alias, vec![parse_as_bool(col_data)]),
+                                _ => {
+                                    let value = match col_data {
+                                        Value::Null => None,
+                                        Value::String(s) => Some(s.clone()),
+                                        other => Some(other.to_string()),
+                                    };
+                                    Series::new(alias, vec![value])
+                                }
+                            }
                         }
                     };
                     columns_vec.push(Column::Series(series.into()));
+                } else {
+                    // Column not found in data, create empty column with nulls
+                    // We'll resize it to max_rows after processing all columns
+                    let series = match dtype {
+                        DataType::String | DataType::Date => Series::new(alias, Vec::<Option<String>>::new()),
+                        DataType::Float64 => Series::new(alias, Vec::<Option<f64>>::new()),
+                        DataType::Int64 => Series::new(alias, Vec::<Option<i64>>::new()),
+                        DataType::Boolean => Series::new(alias, Vec::<Option<bool>>::new()),
+                        _ => Series::new(alias, Vec::<Option<String>>::new()),
+                    };
+                    columns_vec.push(Column::Series(series.into()));
                 }
-
-                polars_core::frame::DataFrame::new(columns_vec)
-                    .map_err(|e| Error::DataFrame(format!("Failed to create DataFrame: {}", e)))
             }
 
-            Value::Object(obj) => {
-                // For object format, assume it's column-oriented data
-                // e.g., {"col1": [1,2,3], "col2": ["a","b","c"]}
-                let mut columns_vec = Vec::new();
-
-                // Track the maximum number of rows across all columns
-                let mut max_rows = 0usize;
-
-                for col_def in &self.schema {
-                    let alias = col_def.alias.clone().into();
-                    let dtype = to_dtype(&col_def.dtype);
-
-                    if let Some(col_data) = obj.get(&col_def.name) {
-                        let series = match col_data {
-                            Value::Array(values) => {
-                                max_rows = max_rows.max(values.len());
-
-                                match dtype {
-                                    DataType::String | DataType::Date => {
-                                        let parsed: Vec<Option<String>> = values
-                                            .iter()
-                                            .map(|v| match v {
-                                                Value::Null => None,
-                                                Value::String(s) => Some(s.clone()),
-                                                other => Some(other.to_string()),
-                                            })
-                                            .collect();
-                                        Series::new(alias, parsed)
-                                    }
-                                    DataType::Float64 => {
-                                        let parsed: Vec<Option<f64>> = values.iter().map(parse_as_f64).collect();
-                                        Series::new(alias, parsed)
-                                    }
-                                    DataType::Int64 => {
-                                        let parsed: Vec<Option<i64>> = values.iter().map(parse_as_i64).collect();
-                                        Series::new(alias, parsed)
-                                    }
-                                    DataType::Boolean => {
-                                        let parsed: Vec<Option<bool>> = values.iter().map(parse_as_bool).collect();
-                                        Series::new(alias, parsed)
-                                    }
-                                    _ => {
-                                        // Default to string
-                                        let parsed: Vec<Option<String>> = values
-                                            .iter()
-                                            .map(|v| match v {
-                                                Value::Null => None,
-                                                Value::String(s) => Some(s.clone()),
-                                                other => Some(other.to_string()),
-                                            })
-                                            .collect();
-                                        Series::new(alias, parsed)
-                                    }
-                                }
-                            }
-                            // If it's not an array, treat it as a single value repeated for all rows
-                            // This will be adjusted after we know the max_rows
-                            _ => {
-                                // For now, create a single-element series
-                                match dtype {
-                                    DataType::String | DataType::Date => {
-                                        let value = match col_data {
-                                            Value::Null => None,
-                                            Value::String(s) => Some(s.clone()),
-                                            other => Some(other.to_string()),
-                                        };
-                                        Series::new(alias, vec![value])
-                                    }
-                                    DataType::Float64 => Series::new(alias, vec![parse_as_f64(col_data)]),
-                                    DataType::Int64 => Series::new(alias, vec![parse_as_i64(col_data)]),
-                                    DataType::Boolean => Series::new(alias, vec![parse_as_bool(col_data)]),
-                                    _ => {
-                                        let value = match col_data {
-                                            Value::Null => None,
-                                            Value::String(s) => Some(s.clone()),
-                                            other => Some(other.to_string()),
-                                        };
-                                        Series::new(alias, vec![value])
-                                    }
-                                }
-                            }
-                        };
-                        columns_vec.push(Column::Series(series.into()));
-                    } else {
-                        // Column not found in data, create empty column with nulls
-                        // We'll resize it to max_rows after processing all columns
-                        let series = match dtype {
-                            DataType::String | DataType::Date => Series::new(alias, Vec::<Option<String>>::new()),
-                            DataType::Float64 => Series::new(alias, Vec::<Option<f64>>::new()),
-                            DataType::Int64 => Series::new(alias, Vec::<Option<i64>>::new()),
-                            DataType::Boolean => Series::new(alias, Vec::<Option<bool>>::new()),
-                            _ => Series::new(alias, Vec::<Option<String>>::new()),
-                        };
-                        columns_vec.push(Column::Series(series.into()));
-                    }
-                }
-
-                // If we have columns, ensure they all have the same length
-                // This handles cases where some columns might have been single values or missing
-                if !columns_vec.is_empty() && max_rows > 0 {
-                    for col in columns_vec.iter_mut() {
-                        if let Column::Series(series) = col {
-                            let current_len = series.len();
-                            if current_len == 0 {
-                                // Create a series of nulls with the right length
-                                let dtype = series.dtype();
-                                let name = series.name().clone();
-                                let new_series = match dtype {
-                                    DataType::String => Series::new(name, vec![Option::<String>::None; max_rows]),
-                                    DataType::Float64 => Series::new(name, vec![Option::<f64>::None; max_rows]),
-                                    DataType::Int64 => Series::new(name, vec![Option::<i64>::None; max_rows]),
-                                    DataType::Boolean => Series::new(name, vec![Option::<bool>::None; max_rows]),
-                                    _ => Series::new(name, vec![Option::<String>::None; max_rows]),
-                                };
-                                *series = new_series.into();
-                            } else if current_len == 1 && max_rows > 1 {
-                                // Repeat the single value for all rows
-                                // This is a broadcast operation
-                                let extended = series.new_from_index(0, max_rows);
-                                *series = extended.into();
-                            }
-                            // If current_len matches max_rows, nothing to do
+            // If we have columns, ensure they all have the same length
+            // This handles cases where some columns might have been single values or missing
+            if !columns_vec.is_empty() && max_rows > 0 {
+                for col in columns_vec.iter_mut() {
+                    if let Column::Series(series) = col {
+                        let current_len = series.len();
+                        if current_len == 0 {
+                            // Create a series of nulls with the right length
+                            let dtype = series.dtype();
+                            let name = series.name().clone();
+                            let new_series = match dtype {
+                                DataType::String => Series::new(name, vec![Option::<String>::None; max_rows]),
+                                DataType::Float64 => Series::new(name, vec![Option::<f64>::None; max_rows]),
+                                DataType::Int64 => Series::new(name, vec![Option::<i64>::None; max_rows]),
+                                DataType::Boolean => Series::new(name, vec![Option::<bool>::None; max_rows]),
+                                _ => Series::new(name, vec![Option::<String>::None; max_rows]),
+                            };
+                            *series = new_series.into();
+                        } else if current_len == 1 && max_rows > 1 {
+                            // Repeat the single value for all rows
+                            // This is a broadcast operation
+                            let extended = series.new_from_index(0, max_rows);
+                            *series = extended.into();
                         }
+                        // If current_len matches max_rows, nothing to do
                     }
                 }
-
-                polars_core::frame::DataFrame::new(columns_vec)
-                    .map_err(|e| Error::DataFrame(format!("Failed to create DataFrame: {}", e)))
             }
 
-            Value::Null => Ok(polars_core::frame::DataFrame::empty()),
-
-            _ => Err(Error::DataFrame(
-                "Data must be an array or object to convert to DataFrame".to_string(),
-            )),
+            polars_core::frame::DataFrame::new(columns_vec)
+                .map_err(|e| Error::DataFrame(format!("Failed to create DataFrame: {}", e)))
         }
+
+        Value::Null => Ok(polars_core::frame::DataFrame::empty()),
+
+        _ => Err(Error::DataFrame(
+            "Data must be an array or object to convert to DataFrame".to_string(),
+        )),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Arrow IPC codec — the data-frame wire format (R1, see
+// docs/extension-data-transport-roadmap.md and d:extension-payload-strategy)
+// ---------------------------------------------------------------------------
+
+/// Encode `(schema, data)` as an Arrow IPC byte buffer — the columnar wire
+/// format that replaces the legacy JSON `rows` string on the extension→host
+/// boundary. The host decodes it with [`from_arrow_ipc`] with no JSON parse and
+/// no per-cell allocation.
+///
+/// In R1 the encode side stands in for the extension/guest (which will use an
+/// `arrow-rs` writer in R1c). The IPC wire format is identical regardless of
+/// which library wrote it, so a polars-written buffer here proves the same
+/// decode contract the guest will exercise.
+pub fn to_arrow_ipc(schema: &[column::Def], data: &Value) -> Result<Vec<u8>, Error> {
+    let mut df = build_polars(schema, data)?;
+    let mut buf = Vec::new();
+    IpcWriter::new(&mut buf)
+        .finish(&mut df)
+        .map_err(|e| Error::DataFrame(format!("Arrow IPC write failed: {e}")))?;
+    Ok(buf)
+}
+
+/// Decode an Arrow IPC byte buffer into a polars DataFrame — the host side of
+/// the data-frame wire format. This is the call that replaces the JSON parse +
+/// per-cell box of the legacy path.
+pub fn from_arrow_ipc(bytes: &[u8]) -> Result<polars_core::frame::DataFrame, Error> {
+    IpcReader::new(std::io::Cursor::new(bytes))
+        .finish()
+        .map_err(|e| Error::DataFrame(format!("Arrow IPC read failed: {e}")))
 }
 
 #[cfg(test)]
@@ -411,5 +457,97 @@ mod tests {
         let polars_df = df.to_dataframe().unwrap();
         assert_eq!(polars_df.height(), 3);
         assert_eq!(polars_df.width(), 2);
+    }
+
+    // -- Arrow IPC round-trip (R1) ------------------------------------------
+
+    #[test]
+    fn arrow_ipc_round_trips_row_oriented() {
+        let schema = two_col_schema();
+        let data = json!([
+            {"a": 1, "b": "x"},
+            {"a": 2, "b": "y"},
+            {"a": 3, "b": "z"},
+        ]);
+        // The host decode (from_arrow_ipc ∘ to_arrow_ipc) must equal the legacy
+        // direct build — same frame, byte-for-byte equivalent contents.
+        let direct = build_polars(&schema, &data).unwrap();
+        let ipc = to_arrow_ipc(&schema, &data).unwrap();
+        let decoded = from_arrow_ipc(&ipc).unwrap();
+        assert_eq!(decoded.height(), 3);
+        assert_eq!(decoded.width(), 2);
+        assert!(decoded.equals(&direct), "IPC round-trip diverged from direct build");
+    }
+
+    #[test]
+    fn arrow_ipc_round_trips_column_oriented() {
+        let schema = two_col_schema();
+        let data = json!({
+            "a": [1, 2, 3, 4],
+            "b": ["w", "x", "y", "z"],
+        });
+        let direct = build_polars(&schema, &data).unwrap();
+        let ipc = to_arrow_ipc(&schema, &data).unwrap();
+        let decoded = from_arrow_ipc(&ipc).unwrap();
+        assert_eq!(decoded.height(), 4);
+        assert!(decoded.equals(&direct), "IPC round-trip diverged from direct build");
+    }
+
+    #[test]
+    fn arrow_ipc_preserves_dtypes_and_nulls() {
+        let schema = vec![
+            column::Def {
+                name: "n".into(),
+                alias: "N".into(),
+                dtype: "number".into(),
+            },
+            column::Def {
+                name: "flag".into(),
+                alias: "Flag".into(),
+                dtype: "boolean".into(),
+            },
+        ];
+        let data = json!([
+            {"n": 1.5, "flag": true},
+            {"n": null, "flag": false},
+            {"n": 2.25, "flag": null},
+        ]);
+        let direct = build_polars(&schema, &data).unwrap();
+        let decoded = from_arrow_ipc(&to_arrow_ipc(&schema, &data).unwrap()).unwrap();
+        // Dtypes survive the IPC round-trip (Float64 + Boolean, not stringified).
+        assert_eq!(decoded.dtypes(), direct.dtypes());
+        assert!(decoded.equals_missing(&direct), "nulls or values diverged across IPC");
+    }
+
+    #[test]
+    fn arrow_ipc_preserves_inexact_arithmetic_floats_bit_for_bit() {
+        // Values like `base + 0.4` are not exactly representable; the bits an
+        // extension computes can differ from the bits you get by parsing their
+        // shortest decimal string (which is what a JSON wire round-trips
+        // through). Arrow carries the source f64 verbatim, so the IPC round-trip
+        // is bit-exact — the property the data-transport design relies on.
+        let schema = vec![column::Def {
+            name: "v".into(),
+            alias: "v".into(),
+            dtype: "number".into(),
+        }];
+        let vals: Vec<f64> = (0..256).map(|i| 100.0 + i as f64 * 0.37 + 0.4).collect();
+        let data = Value::Array(vals.iter().map(|v| json!({ "v": v })).collect());
+
+        let decoded = from_arrow_ipc(&to_arrow_ipc(&schema, &data).unwrap()).unwrap();
+        let col = decoded.column("v").unwrap().as_materialized_series().f64().unwrap();
+        for (i, want) in vals.iter().enumerate() {
+            assert_eq!(
+                col.get(i).unwrap().to_bits(),
+                want.to_bits(),
+                "row {i} drifted across IPC"
+            );
+        }
+    }
+
+    #[test]
+    fn arrow_ipc_error_on_garbage_bytes() {
+        let err = from_arrow_ipc(b"not an arrow ipc stream").unwrap_err();
+        assert!(matches!(err, Error::DataFrame(_)));
     }
 }

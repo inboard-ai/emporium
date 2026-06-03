@@ -9,6 +9,9 @@ license = "MIT"
 [dependencies]
 emporium-types.workspace = true
 polars-core = { version = "0.51", default-features = false }
+# IPC (Arrow) codec for the data-frame wire format. `ipc` is the only feature
+# we need; default-features off keeps the dependency surface tight.
+polars-io = { version = "0.51", default-features = false, features = ["ipc"] }
 serde = { version = "1.0.208", features = ["serde_derive"] }
 serde_json = "1.0.125"
 thiserror = "1.0.63"
