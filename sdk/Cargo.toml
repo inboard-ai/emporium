@@ -16,6 +16,10 @@ arrow-array = "58"
 arrow-schema = "58"
 arrow-ipc = { version = "58", default-features = false }
 thiserror = "1.0"
+# Dynamic encoder (`data_frame_ipc`) accepts runtime JSON data from extensions
+# whose columns are decided at runtime (SQL results, API responses). Guests
+# already depend on serde_json, so this adds no new transitive surface.
+serde_json = "1.0"
 
 [dev-dependencies]
 # Host-side reader, used only in tests to prove the guest-written IPC bytes

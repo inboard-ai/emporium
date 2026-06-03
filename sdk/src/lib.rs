@@ -235,10 +235,134 @@ impl FrameBuilder {
     }
 }
 
+/// Build an Arrow IPC buffer from a **runtime** schema + JSON data — the dynamic
+/// counterpart to [`FrameBuilder`], for extensions whose columns are decided at
+/// runtime (SQL results, API responses). `data` may be row-oriented
+/// (`[{col: val, …}, …]`) or column-oriented (`{col: [val, …]}`); each column is
+/// extracted per its `dtype` into native typed cells, so numbers reach the host
+/// as exact `f64`/`i64` rather than via a re-serialized decimal string.
+/// `serde_json::Value::Null` yields an empty (0-row) frame.
+///
+/// Returns just the IPC bytes — the caller keeps its own schema for the
+/// `data-frame-output.schema` field. `dtype` drives extraction: `number|float`
+/// → f64, `integer|int` → i64, `boolean|bool` → bool, `date` → string, anything
+/// else → string.
+pub fn data_frame_ipc(schema: &[ColumnDef], data: &serde_json::Value) -> Result<Vec<u8>, Error> {
+    use serde_json::Value;
+
+    fn as_f64(v: &Value) -> Option<f64> {
+        match v {
+            Value::Number(n) => n.as_f64(),
+            Value::String(s) => s.parse().ok(),
+            _ => None,
+        }
+    }
+    fn as_i64(v: &Value) -> Option<i64> {
+        match v {
+            Value::Number(n) => n.as_i64(),
+            Value::String(s) => s.parse().ok(),
+            _ => None,
+        }
+    }
+    fn as_bool(v: &Value) -> Option<bool> {
+        match v {
+            Value::Bool(b) => Some(*b),
+            Value::Number(n) => n.as_i64().map(|i| i != 0),
+            Value::String(s) => match s.to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" => Some(true),
+                "false" | "0" | "no" => Some(false),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    fn as_text(v: &Value) -> Option<String> {
+        match v {
+            Value::Null => None,
+            Value::String(s) => Some(s.clone()),
+            other => Some(other.to_string()),
+        }
+    }
+
+    /// Pull one column's cells from row-oriented or column-oriented data.
+    fn cells<T>(data: &Value, name: &str, conv: fn(&Value) -> Option<T>) -> Vec<Option<T>> {
+        match data {
+            Value::Array(rows) => rows.iter().map(|r| r.get(name).and_then(conv)).collect(),
+            Value::Object(obj) => match obj.get(name) {
+                Some(Value::Array(vals)) => vals.iter().map(conv).collect(),
+                Some(v) => vec![conv(v)],
+                None => Vec::new(),
+            },
+            _ => Vec::new(),
+        }
+    }
+
+    let mut builder = Frame::builder();
+    for col in schema {
+        let (name, alias) = (col.name.clone(), col.alias.clone());
+        builder = match col.dtype.as_str() {
+            "number" | "float" => builder.number(name, alias, cells(data, &col.name, as_f64)),
+            "integer" | "int" => builder.integer(name, alias, cells(data, &col.name, as_i64)),
+            "boolean" | "bool" => builder.boolean(name, alias, cells(data, &col.name, as_bool)),
+            "date" => builder.date(name, alias, cells(data, &col.name, as_text)),
+            _ => builder.text(name, alias, cells(data, &col.name, as_text)),
+        };
+    }
+    Ok(builder.build()?.into_parts().1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use emporium_core::tool::data_frame::from_arrow_ipc;
+
+    #[test]
+    fn data_frame_ipc_dynamic_row_oriented_bit_exact() {
+        // The dynamic path (runtime schema + JSON rows) must be as bit-exact as
+        // the typed builder: a Value::Number carries the f64, and as_f64 returns
+        // it unchanged — no decimal string in between.
+        let schema = vec![
+            ColumnDef {
+                name: "d".into(),
+                alias: "D".into(),
+                dtype: "date".into(),
+            },
+            ColumnDef {
+                name: "v".into(),
+                alias: "V".into(),
+                dtype: "number".into(),
+            },
+        ];
+        let vals: Vec<f64> = (0..64).map(|i| 100.0 + i as f64 * 0.37 + 0.4).collect();
+        let data = serde_json::Value::Array(
+            vals.iter()
+                .enumerate()
+                .map(|(i, v)| serde_json::json!({ "d": format!("2024-01-{i:02}"), "v": v }))
+                .collect(),
+        );
+        let df = from_arrow_ipc(&data_frame_ipc(&schema, &data).unwrap()).unwrap();
+        assert_eq!(df.height(), 64);
+        assert_eq!(df.get_column_names(), &["D", "V"]);
+        let col = df.column("V").unwrap().as_materialized_series().f64().unwrap();
+        for (i, want) in vals.iter().enumerate() {
+            assert_eq!(col.get(i).unwrap().to_bits(), want.to_bits(), "row {i} drifted");
+        }
+    }
+
+    #[test]
+    fn data_frame_ipc_column_oriented_and_null() {
+        let schema = vec![ColumnDef {
+            name: "k".into(),
+            alias: "K".into(),
+            dtype: "string".into(),
+        }];
+        let cols = serde_json::json!({ "k": ["a", "b", "c"] });
+        let df = from_arrow_ipc(&data_frame_ipc(&schema, &cols).unwrap()).unwrap();
+        assert_eq!(df.height(), 3);
+
+        let empty = from_arrow_ipc(&data_frame_ipc(&schema, &serde_json::Value::Null).unwrap()).unwrap();
+        assert_eq!(empty.height(), 0);
+    }
 
     #[test]
     fn frame_round_trips_through_host_polars_reader() {
