@@ -1,0 +1,37 @@
+// Minimal benchmark surface: the SAME tabular dataset served two ways across
+// the real component boundary — as a JSON string (today's
+// `data-frame-output.rows`) and as an Arrow IPC buffer (the R1 wire).
+//
+// Deliberately NOT the emporium extension WIT. The canonical `tool-provider`
+// has no binary channel — every payload is a `string` — so Arrow bytes cannot
+// cross it without a breaking change to all 17 extensions. This tiny world
+// stands alongside the real one so the bench can measure both wires over a real
+// wasm boundary without that migration. See
+// ../../../docs/extension-data-transport-roadmap.md (R1 validation).
+package bench:databench@0.1.0;
+
+interface frames {
+    record column {
+        name: string,
+        // emporium dtype convention: "number" | "integer" | "string"
+        dtype: string,
+    }
+
+    // Column schema of the dataset (identical for both wires).
+    schema: func() -> list<column>;
+
+    // Distinct rows in the baked fixture; the guest cycles to reach any `n`.
+    total-rows: func() -> u32;
+
+    // First `n` rows as a JSON array-of-objects string — the legacy
+    // `data-frame-output.rows` wire. Encoded INSIDE the guest (wasm).
+    rows-json: func(n: u32) -> string;
+
+    // First `n` rows as an Arrow IPC (file format) buffer — the R1 wire.
+    // Encoded INSIDE the guest (wasm) with arrow-rs.
+    rows-arrow: func(n: u32) -> list<u8>;
+}
+
+world databench {
+    export frames;
+}

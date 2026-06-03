@@ -1,0 +1,13 @@
+[package]
+name = "wasm-boundary-bench"
+description = "Measures the JSON vs Arrow IPC data-frame wire across a REAL wasm component boundary, dogfooding cargo-component + wasmtime + the emporium-core codec."
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+emporium-core = { workspace = true }
+polars-core = { version = "0.51", default-features = false }
+serde_json = { workspace = true }
+wasmtime = "43.0"
+wasmtime-wasi = "43.0"
