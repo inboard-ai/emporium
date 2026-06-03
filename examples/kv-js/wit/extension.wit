@@ -1,0 +1,195 @@
+// Emporium provider-based extension interfaces.
+// VS Code style: five interfaces + four additive worlds.
+package emporium:extensions@0.3.0;
+
+// ----------------------------------------------------------------------------
+// Shared types (referenced by multiple interfaces — both exports and imports).
+// Lifted out to its own interface so `host-data` (an import) can reference
+// `column-def` without dragging `tool-provider` into the import set of
+// `full-extension` (which would collide with its export of tool-provider).
+// ----------------------------------------------------------------------------
+
+interface types {
+    record column-def {
+        name: string,
+        alias: string,
+        dtype: string,
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Exported interfaces (extension -> host)
+// ----------------------------------------------------------------------------
+
+// Identity, configuration, and introspection. Every extension exports this.
+interface extension {
+    record metadata {
+        id: string,
+        name: string,
+        version: string,
+        description: string,
+    }
+
+    get-metadata: func() -> metadata;
+    init: func(config: string) -> result<_, string>;
+    view: func() -> string;
+}
+
+// Data tools: list + execute. Module-level functions (no resource).
+interface tool-provider {
+    use types.{column-def};
+
+    record activity {
+        present: string,
+        past: string,
+        subject-field: string,
+    }
+
+    record tool-info {
+        id: string,
+        name: string,
+        description: string,
+        schema: string,
+        cacheable: bool,
+        activity: option<activity>,
+        examples: list<string>,
+    }
+
+    record text-output {
+        content: string,
+        label: option<string>,
+        source: option<string>,
+        description: option<string>,
+        nickname: option<string>,
+        store: option<bool>,
+    }
+
+    record data-frame-output {
+        schema: list<column-def>,
+        // Columnar data as an Arrow IPC byte buffer (R1 wire format). Replaced
+        // the legacy JSON `rows` string: no host-side JSON parse, no per-cell
+        // allocation, and bit-exact floats (the JSON path silently drifts
+        // computed f64 cells by up to 1 ULP). The buffer is self-describing;
+        // `schema` above carries display aliases the Arrow schema does not.
+        arrow-ipc: list<u8>,
+        metadata: option<string>,
+        label: option<string>,
+        source: option<string>,
+        description: option<string>,
+        nickname: option<string>,
+        store: option<bool>,
+    }
+
+    variant tool-output {
+        text-output(text-output),
+        data-frame-output(data-frame-output),
+    }
+
+    list-tools: func() -> list<tool-info>;
+    execute-tool: func(name: string, params: string) -> result<tool-output, string>;
+}
+
+// Block types + operations. Module-level functions.
+interface block-provider {
+    record block-type-info {
+        kind: string,
+        name: string,
+        description: string,
+    }
+
+    record operation-def {
+        name: string,
+        description: string,
+        schema: string,
+    }
+
+    variant plan-outcome {
+        state-update(string),
+        query(string),
+        state-update-with-query(tuple<string, string>),
+        computed(string),
+        state-update-with-computed(tuple<string, string>),
+    }
+
+    get-block-types: func() -> list<block-type-info>;
+    create: func(kind: string, input: string) -> result<string, string>;
+    plan: func(kind: string, state: string, operation: string, input: string) -> result<plan-outcome, string>;
+    validate: func(kind: string, state: string) -> result<_, string>;
+}
+
+// Formula functions. Module-level functions.
+interface formula-provider {
+    record formula-def {
+        name: string,
+        description: string,
+        schema: string,
+    }
+
+    get-formulas: func() -> list<formula-def>;
+    evaluate: func(name: string, args: string) -> result<string, string>;
+}
+
+// ----------------------------------------------------------------------------
+// Imported interfaces (host -> extension services)
+// ----------------------------------------------------------------------------
+
+// Streaming cursor access to host-managed data.
+interface host-data {
+    use types.{column-def};
+
+    resource cursor {
+        open: static func(resource-id: string, query: string) -> result<cursor, string>;
+        next-batch: func(batch-size: u32) -> result<option<string>, string>;
+        close: func();
+    }
+
+    get-schema: func(resource-id: string) -> result<list<column-def>, string>;
+    row-count: func(resource-id: string) -> result<u64, string>;
+}
+
+// Extension -> host push notifications (progress, invalidation, tool-changed).
+interface host-events {
+    record progress {
+        percent: option<u8>,
+        message: string,
+    }
+
+    variant invalidate {
+        %resource(string),
+        tool(string),
+        all,
+    }
+
+    variant event {
+        progress(progress),
+        tools-changed,
+        invalidate(invalidate),
+    }
+
+    notify: func(event: event);
+}
+
+// ----------------------------------------------------------------------------
+// Worlds (additive tiers)
+// ----------------------------------------------------------------------------
+
+world tool-extension {
+    import host-events;
+    export extension;
+    export tool-provider;
+}
+
+world block-extension {
+    include tool-extension;
+    export block-provider;
+}
+
+world rich-extension {
+    include block-extension;
+    export formula-provider;
+}
+
+world full-extension {
+    include rich-extension;
+    import host-data;
+}

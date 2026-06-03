@@ -1,0 +1,15 @@
+[package]
+name = "run-ext"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# A tiny generic harness: load any .empkg and drive its tool-provider. Used to
+# prove non-Rust extensions (e.g. the JS kv extension) satisfy the WIT contract.
+
+[dependencies]
+emporium = { path = "../.." }
+emporium-core = { path = "../../core" }
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+anyhow = "1"

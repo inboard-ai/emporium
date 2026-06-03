@@ -1,0 +1,15 @@
+[extension]
+id = "kv-js"
+name = "Key-Value Store (JavaScript)"
+version = "0.1.0"
+description = "A kv store extension written in JavaScript"
+author = "Andy Terra"
+license = "MIT"
+
+[component]
+entry = "kv_js.wasm"
+world = "tool-extension"
+emporium = "0.3.0"
+
+[config]
+schema = "{}"

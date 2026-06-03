@@ -1,0 +1,12 @@
+{
+  "name": "kv-js-extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A kv-like Emporium extension in JavaScript — proof the WIT is the contract, not Rust.",
+  "dependencies": {
+    "@bytecodealliance/jco": "^1.20.0",
+    "apache-arrow": "^21.1.0",
+    "esbuild": "^0.28.0"
+  }
+}

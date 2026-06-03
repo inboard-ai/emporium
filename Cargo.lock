@@ -2353,6 +2353,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "run-ext"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "emporium",
+ "emporium-core",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "rustc-demangle"
 version = "0.1.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"

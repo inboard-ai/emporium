@@ -7,7 +7,19 @@ authors = ["Andy Terra <tech@andyterra.com>"]
 license = "MIT"
 
 [workspace]
-members = [".", "core", "cli", "types", "sdk", "examples/*"]
+# Rust example crates listed explicitly (not `examples/*`) so the non-Rust
+# example extension examples/kv-js (a JavaScript extension built with jco) can
+# live under examples/ without cargo trying to treat it as a crate.
+members = [
+    ".",
+    "core",
+    "cli",
+    "types",
+    "sdk",
+    "examples/kv-repl",
+    "examples/run-ext",
+    "examples/wasm-boundary-bench",
+]
 
 [workspace.dependencies]
 emporium = { path = "." }
