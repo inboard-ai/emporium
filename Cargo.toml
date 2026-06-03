@@ -7,7 +7,7 @@ authors = ["Andy Terra <tech@andyterra.com>"]
 license = "MIT"
 
 [workspace]
-members = [".", "core", "cli", "types", "examples/*"]
+members = [".", "core", "cli", "types", "sdk", "examples/*"]
 
 [workspace.dependencies]
 emporium = { path = "." }

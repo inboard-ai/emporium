@@ -1,0 +1,24 @@
+[package]
+name = "emporium-sdk"
+description = "Guest-side toolkit for writing Emporium extensions: typed data-frame building over the Arrow IPC wire, so extension authors never depend on arrow-rs directly."
+version = "0.1.0"
+edition = "2024"
+authors = ["Andy Terra <tech@inboard.ai>"]
+license = "MIT"
+
+[dependencies]
+# Minimal arrow-rs subcrates — the array builders, the schema/field types, and
+# the IPC file writer. NO umbrella `arrow` crate (pulls compute/ffi), NO polars
+# (that's the host's reader). Compression off keeps the guest wasm lean and free
+# of C deps. This dependency is wrapped: extension authors use `Frame`, never
+# arrow-rs directly, so an arrow-rs major bump never reaches them.
+arrow-array = "58"
+arrow-schema = "58"
+arrow-ipc = { version = "58", default-features = false }
+thiserror = "1.0"
+
+[dev-dependencies]
+# Host-side reader, used only in tests to prove the guest-written IPC bytes
+# round-trip exactly through the host's polars decoder. Not a guest dependency.
+emporium-core = { path = "../core" }
+polars-core = { version = "0.51", default-features = false }
