@@ -90,18 +90,16 @@ macro_rules! impl_tool_and_events {
             type Error = Error;
             fn try_from(df: $tool_mod::DataFrameOutput) -> Result<Self, Self::Error> {
                 let schema: Vec<column::Def> = df.schema.into_iter().map(column::Def::from).collect();
-                let data: serde_json::Value = if df.rows.is_empty() {
-                    serde_json::Value::Null
-                } else {
-                    serde_json::from_str(&df.rows)?
-                };
+                // The data crosses as an Arrow IPC buffer — stored as-is, with no
+                // JSON parse and no per-cell allocation. Decoded lazily host-side
+                // via `tool::DataFrame::to_dataframe`. (R1 wire swap.)
                 let metadata = match df.metadata {
                     Some(s) if !s.is_empty() => Some(serde_json::from_str::<serde_json::Value>(&s)?),
                     _ => None,
                 };
                 Ok(tool::DataFrame {
                     schema,
-                    data,
+                    frame_ipc: df.arrow_ipc,
                     metadata,
                     label: df.label.map(tool::Label::new),
                     source: df.source,

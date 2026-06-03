@@ -13,8 +13,10 @@ use serde_json::Value;
 pub struct DataFrame {
     /// Schema describing each column.
     pub schema: Vec<column::Def>,
-    /// Raw row- or column-oriented JSON data.
-    pub data: Value,
+    /// Columnar data as an Arrow IPC byte buffer — the wire form that replaced
+    /// the legacy JSON `rows` string. Decode with [`Self::to_dataframe`]. Empty
+    /// when the frame carries no rows.
+    pub frame_ipc: Vec<u8>,
     /// Optional free-form metadata attached to the frame.
     pub metadata: Option<Value>,
     /// Optional label for display (e.g., "AAPL" for stock data).
@@ -34,11 +36,13 @@ pub struct DataFrame {
 }
 
 impl DataFrame {
-    /// Create a new DataFrame output.
-    pub fn new(schema: Vec<column::Def>, data: Value, metadata: Option<Value>) -> Self {
+    /// Create a DataFrame output from an Arrow IPC buffer — the canonical wire
+    /// form. Infallible: the buffer is stored as-is and decoded lazily by
+    /// [`Self::to_dataframe`].
+    pub fn new(schema: Vec<column::Def>, frame_ipc: Vec<u8>, metadata: Option<Value>) -> Self {
         Self {
             schema,
-            data,
+            frame_ipc,
             metadata,
             label: None,
             source: None,
@@ -48,11 +52,11 @@ impl DataFrame {
         }
     }
 
-    /// Create a new DataFrame output with a label.
-    pub fn with_label(schema: Vec<column::Def>, data: Value, metadata: Option<Value>, label: Label) -> Self {
+    /// Create a DataFrame output from an Arrow IPC buffer with a label.
+    pub fn with_label(schema: Vec<column::Def>, frame_ipc: Vec<u8>, metadata: Option<Value>, label: Label) -> Self {
         Self {
             schema,
-            data,
+            frame_ipc,
             metadata,
             label: Some(label),
             source: None,
@@ -62,21 +66,67 @@ impl DataFrame {
         }
     }
 
-    /// Convert to a polars DataFrame. Thin delegate over [`build_polars`] so the
-    /// same JSON→polars logic backs both this accessor and [`to_arrow_ipc`].
+    /// Build a DataFrame output from JSON data by encoding it to Arrow IPC.
+    /// Convenience for host-side/test code that still holds a JSON [`Value`];
+    /// the extension→host wire never takes this path (the guest writes Arrow
+    /// directly). `Value::Null` yields an empty frame.
+    pub fn from_json(schema: Vec<column::Def>, data: Value, metadata: Option<Value>) -> Result<Self, Error> {
+        let frame_ipc = if data.is_null() {
+            Vec::new()
+        } else {
+            to_arrow_ipc(&schema, &data)?
+        };
+        Ok(Self::new(schema, frame_ipc, metadata))
+    }
+
+    /// Decode the Arrow IPC buffer into a polars DataFrame — the host accessor.
+    /// Signature is stable across R1 (host call sites untouched); only the
+    /// internals moved from a JSON parse to an Arrow read. Empty buffer → empty
+    /// frame.
     pub fn to_dataframe(self) -> Result<polars_core::frame::DataFrame, Error> {
-        build_polars(&self.schema, &self.data)
+        if self.frame_ipc.is_empty() {
+            return Ok(polars_core::frame::DataFrame::empty());
+        }
+        from_arrow_ipc(&self.frame_ipc)
+    }
+
+    /// Decode the frame and re-serialize as row-oriented JSON objects, keyed by
+    /// column (display) name. Transitional bridge for consumers still on JSON —
+    /// notably the JSON-backed host-data registry (Arrow-ified in R2) and demo
+    /// rendering. The hot extension→host path never takes this; it stays
+    /// columnar end to end.
+    pub fn to_json_rows(&self) -> Result<Vec<Value>, Error> {
+        if self.frame_ipc.is_empty() {
+            return Ok(Vec::new());
+        }
+        let frame = from_arrow_ipc(&self.frame_ipc)?;
+        let cols = frame.get_columns();
+        let mut rows = Vec::with_capacity(frame.height());
+        for i in 0..frame.height() {
+            let mut obj = serde_json::Map::with_capacity(cols.len());
+            for col in cols {
+                let val = col
+                    .get(i)
+                    .map_err(|e| Error::DataFrame(format!("row {i} col '{}': {e}", col.name())))?;
+                obj.insert(col.name().to_string(), anyvalue_to_json(val));
+            }
+            rows.push(Value::Object(obj));
+        }
+        Ok(rows)
     }
 }
 
 // ---------------------------------------------------------------------------
-// JSON → polars (the legacy decode path, now shared)
+// JSON → polars (the legacy decode path; now the Arrow encode-side feeder and
+// a public benchmark/host convenience)
 // ---------------------------------------------------------------------------
 
 /// Build a polars DataFrame from a column schema + JSON data value. Accepts
 /// row-oriented (`[{col: val, …}, …]`) or column-oriented (`{col: [val, …]}`)
-/// shapes. Shared by [`DataFrame::to_dataframe`] and [`to_arrow_ipc`].
-fn build_polars(schema: &[column::Def], data: &Value) -> Result<polars_core::frame::DataFrame, Error> {
+/// shapes. Feeds [`to_arrow_ipc`] and backs [`DataFrame::from_json`]; exposed
+/// so the wasm-boundary bench can time the legacy JSON→polars path directly
+/// against the Arrow path.
+pub fn json_to_polars(schema: &[column::Def], data: &Value) -> Result<polars_core::frame::DataFrame, Error> {
     // Helper to convert string dtype to Polars DataType
     fn to_dtype(dtype: &str) -> DataType {
         match dtype {
@@ -344,7 +394,7 @@ fn build_polars(schema: &[column::Def], data: &Value) -> Result<polars_core::fra
 /// which library wrote it, so a polars-written buffer here proves the same
 /// decode contract the guest will exercise.
 pub fn to_arrow_ipc(schema: &[column::Def], data: &Value) -> Result<Vec<u8>, Error> {
-    let mut df = build_polars(schema, data)?;
+    let mut df = json_to_polars(schema, data)?;
     let mut buf = Vec::new();
     IpcWriter::new(&mut buf)
         .finish(&mut df)
@@ -359,6 +409,33 @@ pub fn from_arrow_ipc(bytes: &[u8]) -> Result<polars_core::frame::DataFrame, Err
     IpcReader::new(std::io::Cursor::new(bytes))
         .finish()
         .map_err(|e| Error::DataFrame(format!("Arrow IPC read failed: {e}")))
+}
+
+/// Convert a single polars `AnyValue` to a JSON value. Used by
+/// [`DataFrame::to_json_rows`]; covers the dtypes the JSON wire ever produced
+/// (text / number / bool / null), with a stringified fallback for the rest.
+fn anyvalue_to_json(v: AnyValue) -> Value {
+    match v {
+        AnyValue::Null => Value::Null,
+        AnyValue::Boolean(b) => Value::Bool(b),
+        AnyValue::String(s) => Value::String(s.to_string()),
+        AnyValue::StringOwned(s) => Value::String(s.to_string()),
+        AnyValue::Int8(n) => Value::from(n),
+        AnyValue::Int16(n) => Value::from(n),
+        AnyValue::Int32(n) => Value::from(n),
+        AnyValue::Int64(n) => Value::from(n),
+        AnyValue::UInt8(n) => Value::from(n),
+        AnyValue::UInt16(n) => Value::from(n),
+        AnyValue::UInt32(n) => Value::from(n),
+        AnyValue::UInt64(n) => Value::from(n),
+        AnyValue::Float32(f) => serde_json::Number::from_f64(f as f64)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+        AnyValue::Float64(f) => serde_json::Number::from_f64(f)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+        other => Value::String(other.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -382,79 +459,79 @@ mod tests {
     }
 
     #[test]
-    fn data_frame_new_populates_schema_data_metadata() {
+    fn data_frame_from_json_populates_schema_and_metadata() {
         let schema = two_col_schema();
         let data = json!([{"a": 1, "b": "x"}]);
         let metadata = Some(json!({"src": "test"}));
-        let df = DataFrame::new(schema.clone(), data.clone(), metadata.clone());
+        let df = DataFrame::from_json(schema.clone(), data, metadata.clone()).unwrap();
         assert_eq!(df.schema.len(), 2);
-        assert_eq!(df.data, data);
+        assert!(
+            !df.frame_ipc.is_empty(),
+            "json data should encode to a non-empty Arrow buffer"
+        );
         assert_eq!(df.metadata, metadata);
         assert!(df.label.is_none());
         assert!(df.source.is_none());
         assert!(df.store.is_none());
         assert!(df.description.is_none());
         assert!(df.nickname.is_none());
+        assert_eq!(df.to_dataframe().unwrap().height(), 1);
     }
 
     #[test]
-    fn data_frame_with_label_populates_schema_data_label() {
+    fn data_frame_with_label_sets_label() {
         let schema = two_col_schema();
-        let data = json!([]);
-        let df = DataFrame::with_label(schema, data, None, Label::new("L"));
+        let df = DataFrame::with_label(schema, Vec::new(), None, Label::new("L"));
         assert_eq!(df.label.as_ref().map(|l| l.0.as_str()), Some("L"));
     }
 
     #[test]
-    fn to_dataframe_from_row_oriented_array() {
+    fn json_to_polars_row_oriented() {
         let schema = two_col_schema();
         let data = json!([
             {"a": 1, "b": "x"},
             {"a": 2, "b": "y"},
         ]);
-        let df = DataFrame::new(schema, data, None);
-        let polars_df = df.to_dataframe().unwrap();
+        let polars_df = json_to_polars(&schema, &data).unwrap();
         assert_eq!(polars_df.height(), 2);
         assert_eq!(polars_df.width(), 2);
     }
 
     #[test]
-    fn to_dataframe_from_empty_array_returns_empty_frame() {
+    fn json_to_polars_empty_array_is_empty_frame() {
         let schema = two_col_schema();
-        let df = DataFrame::new(schema, json!([]), None);
-        let polars_df = df.to_dataframe().unwrap();
+        let polars_df = json_to_polars(&schema, &json!([])).unwrap();
         assert_eq!(polars_df.height(), 0);
     }
 
     #[test]
-    fn to_dataframe_from_null_data_returns_empty_frame() {
+    fn to_dataframe_from_empty_buffer_is_empty_frame() {
         let schema = two_col_schema();
-        let df = DataFrame::new(schema, serde_json::Value::Null, None);
-        let polars_df = df.to_dataframe().unwrap();
-        assert_eq!(polars_df.height(), 0);
+        // Null JSON encodes to an empty buffer; to_dataframe must yield an empty
+        // frame rather than failing on a zero-length IPC read.
+        let df = DataFrame::from_json(schema, serde_json::Value::Null, None).unwrap();
+        assert!(df.frame_ipc.is_empty());
+        assert_eq!(df.to_dataframe().unwrap().height(), 0);
     }
 
     #[test]
-    fn to_dataframe_from_invalid_data_returns_error() {
+    fn from_json_invalid_data_returns_error() {
         let schema = two_col_schema();
-        let df = DataFrame::new(schema.clone(), json!("just a string"), None);
-        let err = df.to_dataframe().unwrap_err();
+        let err = DataFrame::from_json(schema.clone(), json!("just a string"), None).unwrap_err();
         assert!(matches!(err, Error::DataFrame(_)));
 
-        let df = DataFrame::new(schema, json!(42), None);
-        let err = df.to_dataframe().unwrap_err();
+        let err = DataFrame::from_json(schema, json!(42), None).unwrap_err();
         assert!(matches!(err, Error::DataFrame(_)));
     }
 
     #[test]
-    fn to_dataframe_column_oriented_object_format() {
+    fn json_to_polars_column_oriented_object_format() {
         let schema = two_col_schema();
         let data = json!({
             "a": [1, 2, 3],
             "b": ["x", "y", "z"],
         });
-        let df = DataFrame::new(schema, data, None);
-        let polars_df = df.to_dataframe().unwrap();
+        let polars_df = json_to_polars(&schema, &data).unwrap();
         assert_eq!(polars_df.height(), 3);
         assert_eq!(polars_df.width(), 2);
     }
@@ -471,7 +548,7 @@ mod tests {
         ]);
         // The host decode (from_arrow_ipc ∘ to_arrow_ipc) must equal the legacy
         // direct build — same frame, byte-for-byte equivalent contents.
-        let direct = build_polars(&schema, &data).unwrap();
+        let direct = json_to_polars(&schema, &data).unwrap();
         let ipc = to_arrow_ipc(&schema, &data).unwrap();
         let decoded = from_arrow_ipc(&ipc).unwrap();
         assert_eq!(decoded.height(), 3);
@@ -486,7 +563,7 @@ mod tests {
             "a": [1, 2, 3, 4],
             "b": ["w", "x", "y", "z"],
         });
-        let direct = build_polars(&schema, &data).unwrap();
+        let direct = json_to_polars(&schema, &data).unwrap();
         let ipc = to_arrow_ipc(&schema, &data).unwrap();
         let decoded = from_arrow_ipc(&ipc).unwrap();
         assert_eq!(decoded.height(), 4);
@@ -512,7 +589,7 @@ mod tests {
             {"n": null, "flag": false},
             {"n": 2.25, "flag": null},
         ]);
-        let direct = build_polars(&schema, &data).unwrap();
+        let direct = json_to_polars(&schema, &data).unwrap();
         let decoded = from_arrow_ipc(&to_arrow_ipc(&schema, &data).unwrap()).unwrap();
         // Dtypes survive the IPC round-trip (Float64 + Boolean, not stringified).
         assert_eq!(decoded.dtypes(), direct.dtypes());

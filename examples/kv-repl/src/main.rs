@@ -477,16 +477,24 @@ async fn run_toy_plan(ext: &Extension, plan_json: &str) {
         }
     };
 
-    let rows = match df.data.as_array() {
-        Some(rows) => rows,
-        None => {
-            println!("Unexpected list_keys data shape (expected JSON array)");
+    // The frame crosses as Arrow now; decode to JSON rows for display. Columns
+    // are keyed by display alias, so resolve the "key" column's alias first.
+    let key_col = df
+        .schema
+        .iter()
+        .find(|c| c.name == "key")
+        .map(|c| c.alias.clone())
+        .unwrap_or_else(|| "key".to_string());
+    let rows = match df.to_json_rows() {
+        Ok(rows) => rows,
+        Err(err) => {
+            println!("Failed to decode list_keys frame: {err}");
             return;
         }
     };
     let keys: Vec<&str> = rows
         .iter()
-        .filter_map(|row| row.get("key").and_then(|v| v.as_str()))
+        .filter_map(|row| row.get(key_col.as_str()).and_then(|v| v.as_str()))
         .collect();
 
     let prefixes = match plan.get("filter").and_then(|f| f.get("key_starts_with_any")) {
@@ -587,10 +595,10 @@ async fn sync_keys_silent(ext: &Extension, registry: &DataRegistry) -> Option<us
         }
     };
 
-    let rows: Vec<serde_json::Value> = match df.data.as_array() {
-        Some(rows) => rows.clone(),
-        None => {
-            println!("Unexpected list_keys data shape (expected JSON array)");
+    let rows: Vec<serde_json::Value> = match df.to_json_rows() {
+        Ok(rows) => rows,
+        Err(err) => {
+            println!("Failed to decode list_keys frame: {err}");
             return None;
         }
     };

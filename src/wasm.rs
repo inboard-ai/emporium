@@ -22,7 +22,7 @@ use crate::manifest::Manifest;
 /// WIT package namespace and identifier for the emporium extension interfaces.
 pub(crate) const WIT_PACKAGE: &str = "emporium:extensions";
 /// WIT package version currently supported by the host.
-pub(crate) const WIT_VERSION: &str = "0.2.0";
+pub(crate) const WIT_VERSION: &str = "0.3.0";
 
 /// Default world selected when a manifest does not declare one.
 pub(crate) const DEFAULT_WORLD: &str = "tool-extension";
@@ -110,7 +110,7 @@ pub(crate) mod full_bindings {
         imports: { default: async },
         exports: { default: async },
         with: {
-            "emporium:extensions/host-data@0.2.0.cursor": crate::host_data::Cursor,
+            "emporium:extensions/host-data@0.3.0.cursor": crate::host_data::Cursor,
         },
     });
 }
@@ -1512,13 +1512,25 @@ mod tests {
             _ => panic!("expected Text variant"),
         }
 
+        // Build the Arrow IPC wire payload the way an extension will: encode a
+        // real row-oriented frame to IPC bytes (R1 wire swap — was a JSON `rows`
+        // string).
+        let kv_schema = vec![emporium_core::column::Def {
+            name: "k".into(),
+            alias: "Key".into(),
+            dtype: "string".into(),
+        }];
+        let arrow_ipc =
+            emporium_core::tool::data_frame::to_arrow_ipc(&kv_schema, &serde_json::json!([{"k": "a"}, {"k": "b"}]))
+                .unwrap();
+
         let wit_df = wit_tool_provider::ToolOutput::DataFrameOutput(wit_tool_provider::DataFrameOutput {
             schema: vec![wit_tool_provider::ColumnDef {
                 name: "k".into(),
                 alias: "Key".into(),
                 dtype: "string".into(),
             }],
-            rows: r#"[["a"],["b"]]"#.into(),
+            arrow_ipc,
             metadata: Some(r#"{"source":"unit"}"#.into()),
             label: Some("kv".into()),
             source: Some("unit".into()),
@@ -1534,13 +1546,16 @@ mod tests {
                 assert_eq!(df.schema[0].name, "k");
                 assert_eq!(df.schema[0].alias, "Key");
                 assert_eq!(df.schema[0].dtype, "string");
-                assert_eq!(df.data, serde_json::json!([["a"], ["b"]]));
                 assert_eq!(df.metadata, Some(serde_json::json!({"source": "unit"})));
                 assert_eq!(df.label.as_ref().map(|l| l.0.as_str()), Some("kv"));
                 assert_eq!(df.source.as_deref(), Some("unit"));
                 assert_eq!(df.description, None);
                 assert_eq!(df.nickname.as_deref(), Some("kv_rows"));
                 assert_eq!(df.store, Some(false));
+                // Decode the Arrow buffer and confirm the cells survived the wire.
+                let frame = df.to_dataframe().unwrap();
+                assert_eq!(frame.height(), 2);
+                assert_eq!(frame.width(), 1);
             }
             _ => panic!("expected DataFrame variant"),
         }

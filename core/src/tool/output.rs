@@ -20,9 +20,15 @@ impl Output {
         Output::Text(Text::new(content))
     }
 
-    /// Create a new columnar output.
-    pub fn columnar(data: serde_json::Value, schema: Vec<column::Def>, metadata: Option<serde_json::Value>) -> Self {
-        Output::DataFrame(DataFrame::new(schema, data, metadata))
+    /// Create a new columnar output from JSON data (encodes to Arrow IPC).
+    /// Fallible because encoding can fail on malformed data; the host wire path
+    /// constructs [`DataFrame`] directly from an already-encoded buffer.
+    pub fn columnar(
+        data: serde_json::Value,
+        schema: Vec<column::Def>,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<Self, crate::Error> {
+        Ok(Output::DataFrame(DataFrame::from_json(schema, data, metadata)?))
     }
 
     /// Get the label from the output, if any.
@@ -176,7 +182,7 @@ mod tests {
         let text_output: Output = Text::new("hi").into();
         assert!(matches!(text_output, Output::Text(_)));
 
-        let df = DataFrame::new(Vec::new(), serde_json::Value::Null, None);
+        let df = DataFrame::new(Vec::new(), Vec::new(), None);
         let df_output: Output = df.into();
         assert!(matches!(df_output, Output::DataFrame(_)));
     }
@@ -186,7 +192,9 @@ mod tests {
         let text = Output::text("hi").with_label(Label::new("L1"));
         assert_eq!(text.label().map(|l| l.0.as_str()), Some("L1"));
 
-        let df = Output::columnar(serde_json::Value::Null, Vec::new(), None).with_label(Label::new("L2"));
+        let df = Output::columnar(serde_json::Value::Null, Vec::new(), None)
+            .unwrap()
+            .with_label(Label::new("L2"));
         assert_eq!(df.label().map(|l| l.0.as_str()), Some("L2"));
     }
 
@@ -195,7 +203,9 @@ mod tests {
         let text = Output::text("hi").with_source("text-src");
         assert_eq!(text.source(), Some("text-src"));
 
-        let df = Output::columnar(serde_json::Value::Null, Vec::new(), None).with_source("df-src");
+        let df = Output::columnar(serde_json::Value::Null, Vec::new(), None)
+            .unwrap()
+            .with_source("df-src");
         assert_eq!(df.source(), Some("df-src"));
     }
 
@@ -204,7 +214,9 @@ mod tests {
         let text = Output::text("hi").with_description("text-desc");
         assert_eq!(text.description(), Some("text-desc"));
 
-        let df = Output::columnar(serde_json::Value::Null, Vec::new(), None).with_description("df-desc");
+        let df = Output::columnar(serde_json::Value::Null, Vec::new(), None)
+            .unwrap()
+            .with_description("df-desc");
         assert_eq!(df.description(), Some("df-desc"));
     }
 
@@ -213,7 +225,9 @@ mod tests {
         let text = Output::text("hi").with_nickname("text_nick");
         assert_eq!(text.nickname(), Some("text_nick"));
 
-        let df = Output::columnar(serde_json::Value::Null, Vec::new(), None).with_nickname("df_nick");
+        let df = Output::columnar(serde_json::Value::Null, Vec::new(), None)
+            .unwrap()
+            .with_nickname("df_nick");
         assert_eq!(df.nickname(), Some("df_nick"));
     }
 
@@ -222,7 +236,9 @@ mod tests {
         let text = Output::text("hi").with_store(true);
         assert_eq!(text.store(), Some(true));
 
-        let df = Output::columnar(serde_json::Value::Null, Vec::new(), None).with_store(false);
+        let df = Output::columnar(serde_json::Value::Null, Vec::new(), None)
+            .unwrap()
+            .with_store(false);
         assert_eq!(df.store(), Some(false));
     }
 
@@ -247,7 +263,13 @@ mod tests {
 
     #[test]
     fn with_source_preserves_other_fields_on_data_frame() {
-        let df = Output::columnar(serde_json::json!([{"k": "v"}]), Vec::new(), None)
+        let col = column::Def {
+            name: "k".to_string(),
+            alias: "k".to_string(),
+            dtype: "string".to_string(),
+        };
+        let df = Output::columnar(serde_json::json!([{"k": "v"}]), vec![col], None)
+            .unwrap()
             .with_label(Label::new("lab"))
             .with_description("desc")
             .with_nickname("nick")
@@ -259,7 +281,7 @@ mod tests {
         assert_eq!(df.nickname(), Some("nick"));
         assert_eq!(df.store(), Some(false));
         match df {
-            Output::DataFrame(frame) => assert_eq!(frame.data, serde_json::json!([{"k": "v"}])),
+            Output::DataFrame(frame) => assert_eq!(frame.to_dataframe().unwrap().height(), 1),
             _ => panic!("expected DataFrame variant"),
         }
     }
@@ -272,6 +294,7 @@ mod tests {
             dtype: "string".to_string(),
         };
         let output = Output::columnar(serde_json::json!([{"k": "v"}]), vec![col], None)
+            .unwrap()
             .with_label(Label::new("L"))
             .with_description("d")
             .with_nickname("n");
@@ -290,7 +313,7 @@ mod tests {
             alias: "K".to_string(),
             dtype: "string".to_string(),
         };
-        let output = Output::columnar(serde_json::json!([{"k": "v"}]), vec![col], None);
+        let output = Output::columnar(serde_json::json!([{"k": "v"}]), vec![col], None).unwrap();
         match output {
             Output::DataFrame(df) => {
                 assert_eq!(df.schema.len(), 1);

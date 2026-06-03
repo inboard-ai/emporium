@@ -13,8 +13,7 @@
 use std::time::Instant;
 
 use emporium_core::column;
-use emporium_core::tool::DataFrame;
-use emporium_core::tool::data_frame::from_arrow_ipc;
+use emporium_core::tool::data_frame::{from_arrow_ipc, json_to_polars};
 use polars_core::frame::DataFrame as PolarsFrame;
 use serde_json::Value;
 use wasmtime::component::{Component, Linker, ResourceTable};
@@ -118,9 +117,8 @@ fn main() -> wasmtime::Result<()> {
     let json_bytes = json_wire.len();
     let arrow_bytes = arrow_wire.len();
 
-    let json_frame: PolarsFrame = DataFrame::new(defs.clone(), serde_json::from_str::<Value>(&json_wire)?, None)
-        .to_dataframe()
-        .expect("json → polars");
+    let json_frame: PolarsFrame =
+        json_to_polars(&defs, &serde_json::from_str::<Value>(&json_wire)?).expect("json → polars");
     let arrow_frame: PolarsFrame = from_arrow_ipc(&arrow_wire).expect("arrow → polars");
 
     assert_eq!(json_frame.height(), n as usize, "row count wrong");
@@ -172,7 +170,7 @@ fn main() -> wasmtime::Result<()> {
     });
     let json_decode_us = time_avg_us(iters, || {
         let v: Value = serde_json::from_str(&json_wire).unwrap();
-        let _ = DataFrame::new(defs.clone(), v, None).to_dataframe().unwrap();
+        let _ = json_to_polars(&defs, &v).unwrap();
     });
     let arrow_decode_us = time_avg_us(iters, || {
         let _ = from_arrow_ipc(&arrow_wire).unwrap();
