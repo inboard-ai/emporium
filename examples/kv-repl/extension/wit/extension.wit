@@ -1,6 +1,6 @@
 // Emporium provider-based extension interfaces.
 // VS Code style: five interfaces + four additive worlds.
-package emporium:extensions@0.2.0;
+package emporium:extensions@0.3.0;
 
 // ----------------------------------------------------------------------------
 // Shared types (referenced by multiple interfaces — both exports and imports).
@@ -66,7 +66,12 @@ interface tool-provider {
 
     record data-frame-output {
         schema: list<column-def>,
-        rows: string,
+        // Columnar data as an Arrow IPC byte buffer (R1 wire format). Replaced
+        // the legacy JSON `rows` string: no host-side JSON parse, no per-cell
+        // allocation, and bit-exact floats (the JSON path silently drifts
+        // computed f64 cells by up to 1 ULP). The buffer is self-describing;
+        // `schema` above carries display aliases the Arrow schema does not.
+        arrow-ipc: list<u8>,
         metadata: option<string>,
         label: option<string>,
         source: option<string>,

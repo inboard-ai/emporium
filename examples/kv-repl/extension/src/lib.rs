@@ -390,20 +390,19 @@ fn execute_tool(name: &str, params: &Value) -> Result<ToolOutput, String> {
             Ok(text_output(message))
         }
         "list_keys" => {
-            let rows = KV.with_borrow(|kv| {
-                let mut keys: Vec<&String> = kv.keys().collect();
+            let keys: Vec<String> = KV.with_borrow(|kv| {
+                let mut keys: Vec<String> = kv.keys().cloned().collect();
                 keys.sort();
-                keys.into_iter().map(|k| json!({ "key": k })).collect::<Vec<_>>()
+                keys
             });
-            let rows_json = serde_json::to_string(&rows).map_err(|err| err.to_string())?;
-            Ok(data_frame_output(
-                vec![ColumnDef {
-                    name: "key".to_string(),
-                    alias: "Key".to_string(),
-                    dtype: "string".to_string(),
-                }],
-                rows_json,
-            ))
+            // Build columnar output with the guest SDK: native String values go
+            // straight into an Arrow IPC buffer — no JSON rows string, no parse.
+            let frame = emporium_sdk::Frame::builder()
+                .text("key", "Key", keys)
+                .build()
+                .map_err(|err| err.to_string())?;
+            let (schema, arrow_ipc) = frame.into_parts();
+            Ok(data_frame_output(map_schema(schema), arrow_ipc))
         }
         other => Err(format!("Unknown tool: {other}")),
     }
@@ -430,12 +429,12 @@ fn text_output(content: String) -> ToolOutput {
     })
 }
 
-/// Wrap a schema + row-oriented JSON string in a `ToolOutput::DataFrameOutput`
-/// with no optional metadata set.
-fn data_frame_output(schema: Vec<ColumnDef>, rows: String) -> ToolOutput {
+/// Wrap a schema + an Arrow IPC buffer in a `ToolOutput::DataFrameOutput` with
+/// no optional metadata set.
+fn data_frame_output(schema: Vec<ColumnDef>, arrow_ipc: Vec<u8>) -> ToolOutput {
     ToolOutput::DataFrameOutput(DataFrameOutput {
         schema,
-        rows,
+        arrow_ipc,
         metadata: None,
         label: None,
         source: None,
@@ -443,6 +442,19 @@ fn data_frame_output(schema: Vec<ColumnDef>, rows: String) -> ToolOutput {
         nickname: None,
         store: None,
     })
+}
+
+/// Map the SDK's column descriptors onto the wit-bindgen-generated `ColumnDef`
+/// — a 3-field copy, the small seam that keeps the WIT (not shared Rust types)
+/// the contract between host and extension.
+fn map_schema(defs: Vec<emporium_sdk::ColumnDef>) -> Vec<ColumnDef> {
+    defs.into_iter()
+        .map(|d| ColumnDef {
+            name: d.name,
+            alias: d.alias,
+            dtype: d.dtype,
+        })
+        .collect()
 }
 
 /// Reject any block kind other than `prefix-tracker`.

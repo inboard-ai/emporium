@@ -19,7 +19,7 @@ features = ["Key-value CRUD", "DataFrame key listing", "Prefix tracking blocks",
 [component]
 entry = "target/wasm32-wasip1/release/kv_extension.wasm"
 world = "full-extension"
-emporium = "0.2.0"
+emporium = "0.3.0"
 
 [config]
 schema = '{}'
