@@ -902,6 +902,7 @@ dependencies = [
  "arrow-schema",
  "emporium-core",
  "polars-core",
+ "serde_json",
  "thiserror 1.0.69",
 ]
 
