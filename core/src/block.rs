@@ -1,4 +1,4 @@
-//! Block type metadata (Phase 2 stub; fleshed out in Phase 3).
+//! Block type metadata exported by an extension's block-provider.
 
 use serde::{Deserialize, Serialize};
 

@@ -378,7 +378,8 @@ fn json_to_polars_columns(schema: &[column::Def], data: &Value) -> Result<polars
                         // If it's not an array, treat it as a single value repeated for all rows
                         // This will be adjusted after we know the max_rows
                         _ => {
-                            // For now, create a single-element series
+                            // Scalar value → single-element series; the resize
+                            // pass below broadcasts it to the frame's row count.
                             match dtype {
                                 DataType::String | DataType::Date => {
                                     let value = match col_data {

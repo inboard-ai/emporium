@@ -1,4 +1,4 @@
-//! Formula definitions (Phase 2 stub; fleshed out in Phase 4).
+//! Formula definitions exported by an extension's formula-provider.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

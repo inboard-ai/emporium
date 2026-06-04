@@ -1,4 +1,4 @@
-//! Operation definitions (Phase 2 stub; fleshed out in Phase 3).
+//! Operation definitions exported by an extension's block-provider.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

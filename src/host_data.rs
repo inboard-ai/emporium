@@ -3,8 +3,9 @@
 //! Extensions loaded against the `full-extension` world can stream-read
 //! host-managed data by opening a [`Cursor`] resource and requesting batches
 //! from it. The host-side data is held in a [`DataRegistry`] — a cheap,
-//! clone-friendly handle backed by an `Arc<RwLock<...>>`. Phase 5 keeps the
-//! query parameter opaque (no filtering); real predicate pushdown is Phase 6+.
+//! clone-friendly handle backed by an `Arc<RwLock<...>>`. The cursor's `query`
+//! parameter is currently opaque (no filtering); predicate/window pushdown is
+//! R4 in the data-transport roadmap (`d:extension-payload-strategy`).
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -107,8 +108,8 @@ pub struct Cursor {
     pub(crate) resource_id: String,
     /// Next row index to emit on `next-batch`.
     pub(crate) offset: usize,
-    /// Opaque query string retained for future filtering (Phase 6+). Not
-    /// interpreted in Phase 5.
+    /// Opaque query string reserved for predicate/window pushdown (R4); not yet
+    /// interpreted.
     #[allow(dead_code)]
     pub(crate) query: Option<String>,
 }

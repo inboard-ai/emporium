@@ -1,6 +1,4 @@
-//! Plan execution outcomes (Phase 2 stub; fleshed out in Phase 3).
-
-pub mod data;
+//! Plan execution outcomes returned by a block operation.
 
 use serde::{Deserialize, Serialize};
 
