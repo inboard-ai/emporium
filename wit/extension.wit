@@ -129,6 +129,143 @@ interface formula-provider {
     evaluate: func(name: string, args: string) -> result<string, string>;
 }
 
+// Data capability: declarative, UI-builder-facing surface. A sibling to
+// tool-provider — NEVER a replacement. tool-provider stays the imperative LLM
+// affordance (execute_sql); data-provider drives the dashboard/tile builder so
+// a non-technical user picks a source -> fills a typed param form (or drills) ->
+// the host knows the output schema BEFORE fetch. See
+// docs/ui-data-capability-protocol.md.
+interface data-provider {
+    use types.{column-def};
+
+    // What the host can pull from this configured instance. `input` says how the
+    // host gathers what `fetch` needs; `output` says what the host knows about
+    // the result shape before fetch (the keystone — a known schema seeds the
+    // measure/axis pickers immediately, no fetch required).
+    record data-source {
+        id: string,
+        display-name: string,
+        description: string,
+        input: input-spec,
+        output: output-contract,
+    }
+
+    // How the host gathers fetch inputs.
+    variant input-spec {
+        // Typed param form driven by a JSON-Schema string (same shape as
+        // tool-info.schema). v1a.
+        params(string),
+        // Drill-down tree via `browse`. v1b.
+        browse,
+        // A browse selection plus params layered on top. v1b+.
+        params-and-browse(string),
+        // Free-form text the extension compiles into a query; output is always
+        // `resolved`. v1b.
+        free-query(free-query-spec),
+    }
+
+    record free-query-spec {
+        language: string,    // "sql" | "promql" | "text" | ...
+        placeholder: string,
+    }
+
+    // What the host knows about output shape before fetch.
+    variant output-contract {
+        // Statically known regardless of input — host seeds schema now.
+        known(output-spec),
+        // Knowable only after the selection is made — host calls
+        // `output-schema(source, selection)` once the user has chosen. v1b.
+        resolved,
+    }
+
+    // The output shape. Maps onto the host's projection shape: `rows` -> a
+    // tabular relation, `scalar` -> a single headline value, `finished` -> a
+    // complete resource the host references without reshaping.
+    variant output-spec {
+        rows(list<column-def>),
+        scalar(column-def),
+        finished,
+    }
+
+    // --- Catalog discovery -------------------------------------------------
+
+    // Runtime catalog. For static catalogs the host may skip this and read the
+    // manifest `[[data_sources]]` mirror; `is-catalog-dynamic` says which.
+    list-sources: func() -> result<list<data-source>, data-error>;
+    is-catalog-dynamic: func() -> bool;
+
+    // --- Browse (one level per call; paginated) — v1b ----------------------
+
+    record node {
+        id: string,
+        label: string,
+        // true -> descendable (call browse again with this appended to path);
+        // false -> a selectable leaf.
+        branch: bool,
+        // present on leaves whose output shape is known at browse time.
+        output: option<output-spec>,
+    }
+
+    record page {
+        nodes: list<node>,
+        next-cursor: option<string>,
+    }
+
+    // `path` is a JSON array of node ids from root (e.g. `[]`, `["conn_prod"]`).
+    browse: func(
+        source: string,
+        path: string,
+        cursor: option<string>,
+        limit: u32,
+    ) -> result<page, data-error>;
+
+    // --- Output schema (when output-contract is `resolved`) — v1b ----------
+
+    output-schema: func(
+        source: string,
+        selection: string,   // JSON Selection
+    ) -> result<output-spec, data-error>;
+
+    // --- Fetch -------------------------------------------------------------
+
+    // The extension OWNS query construction; the host hands a Selection. Result
+    // data crosses as an Arrow IPC buffer — the SAME wire as
+    // tool-provider.data-frame-output (R1) — so fetch is Arrow-native from day
+    // one with no JSON payload to retrofit.
+    record fetch-result {
+        // Columnar result as an Arrow IPC buffer (rows/scalar). Empty for a
+        // `finished` output, where `resource-id` carries the landed reference.
+        arrow-ipc: list<u8>,
+        // Set only for `finished` outputs.
+        resource-id: option<string>,
+        // Pagination continuation; absent => complete. Always absent in v1a
+        // (eager buffer); the v1b export cursor sets it.
+        next-cursor: option<string>,
+    }
+
+    fetch: func(
+        source: string,
+        selection: string,   // JSON Selection
+    ) -> result<fetch-result, data-error>;
+
+    // --- Typed error taxonomy ----------------------------------------------
+
+    variant data-error {
+        auth-failed(string),         // bad/expired credentials -> "Reconnect"
+        not-found(string),           // source/path/table gone
+        invalid-selection(string),   // host built a Selection the ext rejects
+        rate-limited(rate-limit),    // back off; "try again in N s"
+        transient(string),           // network blip; offer retry
+        unsupported(string),         // capability not implemented for this source
+        internal(string),            // catch-all; generic message + logged detail
+    }
+
+    record rate-limit {
+        message: string,
+        retry-after-secs: option<u32>,
+    }
+}
+
 // ----------------------------------------------------------------------------
 // Imported interfaces (host -> extension services)
 // ----------------------------------------------------------------------------
@@ -194,4 +331,14 @@ world rich-extension {
 world full-extension {
     include rich-extension;
     import host-data;
+}
+
+// Data capability tier: tool-provider (LLM) + data-provider (UI builder).
+// A SECOND branch off tool-extension, orthogonal to the block/formula chain —
+// a data extension (SQL, AlphaVantage) wants tool + data without empty block or
+// formula exports. See docs/ui-data-capability-protocol.md §2.2 (D-DATA-1) and
+// d:extension-payload-strategy.
+world data-extension {
+    include tool-extension;
+    export data-provider;
 }

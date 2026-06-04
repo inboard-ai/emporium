@@ -2,6 +2,7 @@
 
 pub mod block;
 pub mod column;
+pub mod data;
 pub mod error;
 pub mod event;
 pub mod formula;
