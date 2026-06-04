@@ -65,7 +65,13 @@ pub struct PackageSection {
 }
 
 /// The set of worlds defined in `wit/extension.wit`.
-pub const KNOWN_WORLDS: &[&str] = &["tool-extension", "block-extension", "rich-extension", "full-extension"];
+pub const KNOWN_WORLDS: &[&str] = &[
+    "tool-extension",
+    "block-extension",
+    "rich-extension",
+    "full-extension",
+    "data-extension",
+];
 
 /// Validate an extension directory
 pub fn validate_extension(path: &Path) -> Result<Manifest> {
