@@ -9,5 +9,5 @@ publish = false
 emporium-core = { workspace = true }
 polars-core = { version = "0.51", default-features = false }
 serde_json = { workspace = true }
-wasmtime = "44"
-wasmtime-wasi = "44"
+wasmtime = "45"
+wasmtime-wasi = "45"
