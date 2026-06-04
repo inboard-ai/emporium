@@ -143,21 +143,6 @@ fn main() -> wasmtime::Result<()> {
         .collect();
     let total_drift: usize = drift.iter().map(|(_, c)| c).sum();
 
-    println!(
-        "value fidelity vs the bit-exact Arrow wire ({} rows):",
-        json_frame.height()
-    );
-    println!("  arrow   exact by construction — carries the source f64 bits");
-    if total_drift == 0 {
-        println!("  json    exact ✓\n");
-    } else {
-        println!("  json    {total_drift} float cell(s) corrupted by ≤1 ULP (serde_json's default parser):");
-        for (name, c) in drift.iter().filter(|(_, c)| *c > 0) {
-            println!("            {name:<7} {c}/{} rows", json_frame.height());
-        }
-        println!();
-    }
-
     // --- Timings ------------------------------------------------------------
     // "call" times the export: in-guest (wasm) encode plus the copy of the
     // result out of guest linear memory across the component boundary.
@@ -179,50 +164,43 @@ fn main() -> wasmtime::Result<()> {
     let size_ratio = json_bytes as f64 / arrow_bytes as f64;
     let call_ratio = json_call_us / arrow_call_us;
     let decode_ratio = json_decode_us / arrow_decode_us;
-    let json_total = json_call_us + json_decode_us;
-    let arrow_total = arrow_call_us + arrow_decode_us;
-    let total_ratio = json_total / arrow_total;
 
-    let speed = |r: f64| {
-        if r >= 1.0 {
-            format!("{r:.1}× faster")
-        } else {
-            format!("{:.1}× slower", 1.0 / r)
-        }
+    // Fixed MB / ms so the unit suffixes column-align across rows; Δ is Arrow's
+    // factor advantage on that row. `wire size` = bytes on the wire;
+    // `encode + transfer` = in-wasm encode + the copy of the result out of guest
+    // memory; `decode (host)` = host turning those bytes into a polars table.
+    let mb = |bytes: usize| format!("{:.2} MB", bytes as f64 / 1e6);
+    let ms = |us: f64| format!("{:.2} ms", us / 1e3);
+    let delta = |r: f64| format!("{r:.1}×");
+    let json_fidelity = if total_drift == 0 {
+        "exact ✓".to_string()
+    } else {
+        format!("{total_drift} ✗")
     };
-    // Rows: `wire size` = bytes on the wire; `encode + transfer` = in-wasm
-    // encode + the copy of the result out of guest memory; `decode (host)` =
-    // host turning those bytes into a polars table; `total` = the per-call cost
-    // a host pays end to end. (Spelled out for readers in the README.)
-    println!("  {:<18}{:>14}{:>14}    advantage", "", "JSON", "Arrow");
+
+    println!("  {:<18}{:>14}{:>14}    {:>6}", "", "JSON", "Arrow", "Δ");
     println!(
-        "  {:<18}{:>14}{:>14}    {:.2}× smaller",
+        "  {:<18}{:>14}{:>14}    {:>6}",
         "wire size",
-        format!("{json_bytes} B"),
-        format!("{arrow_bytes} B"),
-        size_ratio
+        mb(json_bytes),
+        mb(arrow_bytes),
+        delta(size_ratio)
     );
     println!(
-        "  {:<18}{:>14}{:>14}    {}",
+        "  {:<18}{:>14}{:>14}    {:>6}",
         "encode + transfer",
-        format!("{json_call_us:.0} µs"),
-        format!("{arrow_call_us:.0} µs"),
-        speed(call_ratio)
+        ms(json_call_us),
+        ms(arrow_call_us),
+        delta(call_ratio)
     );
     println!(
-        "  {:<18}{:>14}{:>14}    {}",
+        "  {:<18}{:>14}{:>14}    {:>6}",
         "decode (host)",
-        format!("{json_decode_us:.0} µs"),
-        format!("{arrow_decode_us:.0} µs"),
-        speed(decode_ratio)
+        ms(json_decode_us),
+        ms(arrow_decode_us),
+        delta(decode_ratio)
     );
-    println!(
-        "  {:<18}{:>14}{:>14}    {}",
-        "total",
-        format!("{json_total:.0} µs"),
-        format!("{arrow_total:.0} µs"),
-        speed(total_ratio)
-    );
+    println!("  {:<18}{:>14}{:>14}", "fidelity", json_fidelity, "exact ✓");
 
     Ok(())
 }
