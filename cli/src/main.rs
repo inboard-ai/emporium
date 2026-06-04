@@ -58,6 +58,11 @@ enum EmporiumCommands {
         /// Check that manifest tools are in sync with the WASM component
         #[arg(long)]
         check_sync: bool,
+
+        /// JSON config file passed to the extension's init during --check-sync
+        /// (required when the manifest's config schema has required fields)
+        #[arg(long, value_name = "FILE")]
+        config: Option<PathBuf>,
     },
 
     /// Check if the current version is available for publishing
@@ -86,10 +91,14 @@ fn main() -> Result<()> {
                 let output_path = output.unwrap_or_else(|| PathBuf::from("."));
                 package::create_package(&extension_path, &output_path)?;
             }
-            EmporiumCommands::Validate { path, check_sync } => {
+            EmporiumCommands::Validate {
+                path,
+                check_sync,
+                config,
+            } => {
                 let extension_path = path.unwrap_or_else(|| PathBuf::from("."));
                 if check_sync {
-                    validate::validate_check_sync(&extension_path)?;
+                    validate::validate_check_sync(&extension_path, config.as_deref())?;
                 } else {
                     validate::validate_extension(&extension_path)?;
                     println!("Extension is valid!");

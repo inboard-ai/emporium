@@ -256,15 +256,17 @@ fn validate_world(world: &Option<String>) -> Result<()> {
 /// or whose name disagrees.
 ///
 /// The tool list is produced by guest code at runtime, so there is no static
-/// shortcut: the component must actually run. `init` is called with an empty
-/// config, which suits config-less extensions; a credentialed extension whose
-/// `init` rejects an empty config reports a load error here.
-pub fn validate_check_sync(path: &Path) -> Result<()> {
+/// shortcut: the component must actually run, which means `init` runs. Config
+/// comes from `config_path` (a JSON file); when none is given and the manifest's
+/// config schema declares required fields, this fails explicitly naming them
+/// (rather than loading with an empty config and reporting an opaque init error).
+pub fn validate_check_sync(path: &Path, config_path: Option<&Path>) -> Result<()> {
     // Validate manifest + wasm, then read both for an in-memory package.
     let manifest = validate_extension(path)?;
     let manifest_toml = fs::read_to_string(path.join("manifest.toml"))?;
     let wasm_path = path.join(&manifest.component.entry);
     let wasm_bytes = fs::read(&wasm_path).with_context(|| format!("Failed to read WASM at {}", wasm_path.display()))?;
+    let config = resolve_config(&manifest, config_path)?;
 
     // Declared tools: id -> name, from the manifest [[tools]] tables.
     let declared: BTreeMap<String, String> = manifest
@@ -280,7 +282,7 @@ pub fn validate_check_sync(path: &Path) -> Result<()> {
         .collect();
 
     // Runtime tools: load the component and ask it.
-    let exported: BTreeMap<String, String> = load_tool_list(&manifest_toml, &wasm_bytes)?
+    let exported: BTreeMap<String, String> = load_tool_list(&manifest_toml, &wasm_bytes, config)?
         .into_iter()
         .map(|t| (t.id, t.name))
         .collect();
@@ -327,7 +329,11 @@ pub fn validate_check_sync(path: &Path) -> Result<()> {
 /// load it through the host to read the runtime tool list. The host's package
 /// reader needs just those two entries, so icons/readme — packaging concerns —
 /// are skipped here.
-fn load_tool_list(manifest_toml: &str, wasm_bytes: &[u8]) -> Result<Vec<emporium_core::tool::Info>> {
+fn load_tool_list(
+    manifest_toml: &str,
+    wasm_bytes: &[u8],
+    config: serde_json::Value,
+) -> Result<Vec<emporium_core::tool::Info>> {
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use tar::Builder;
@@ -340,14 +346,38 @@ fn load_tool_list(manifest_toml: &str, wasm_bytes: &[u8]) -> Result<Vec<emporium
 
     let rt = tokio::runtime::Runtime::new().context("failed to start async runtime")?;
     rt.block_on(async {
-        let ext = emporium::Extension::from_bytes(&pkg, serde_json::json!({}))
+        let ext = emporium::Extension::from_bytes(&pkg, config)
             .await
-            .context(
-                "failed to load the component (check-sync runs the extension's init with an empty \
-                 config; a credentialed extension may reject that)",
-            )?;
+            .context("failed to initialize the component (if it needs configuration, pass --config <file.json>)")?;
         ext.list_tools().await.context("list_tools() failed")
     })
+}
+
+/// Resolve the config passed to the extension's `init`. With `--config`, parse
+/// that JSON file. Without it, an empty config is used only when the manifest's
+/// config schema requires nothing; if the schema lists `required` fields, fail
+/// explicitly and name them rather than load with an empty config.
+fn resolve_config(manifest: &Manifest, config_path: Option<&Path>) -> Result<serde_json::Value> {
+    if let Some(p) = config_path {
+        let raw = fs::read_to_string(p).with_context(|| format!("Failed to read config at {}", p.display()))?;
+        return serde_json::from_str(&raw).with_context(|| format!("config at {} must be valid JSON", p.display()));
+    }
+
+    let schema: serde_json::Value =
+        serde_json::from_str(&manifest.config.schema).context("manifest config.schema is not valid JSON")?;
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    if !required.is_empty() {
+        bail!(
+            "extension '{}' requires configuration to initialize ({}); provide it with --config <file.json>",
+            manifest.extension.id,
+            required.join(", ")
+        );
+    }
+    Ok(serde_json::json!({}))
 }
 
 /// Append in-memory bytes to a tar archive as a 0644 file.
