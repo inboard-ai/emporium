@@ -91,10 +91,11 @@ impl DataFrame {
     }
 
     /// Decode the frame and re-serialize as row-oriented JSON objects, keyed by
-    /// column (display) name. Transitional bridge for consumers still on JSON —
-    /// notably the JSON-backed host-data registry (Arrow-ified in R2) and demo
-    /// rendering. The hot extension→host path never takes this; it stays
-    /// columnar end to end.
+    /// column (display) name. Host-side convenience for **rendering** an Arrow
+    /// frame as JSON — CLI display (`run-ext`, `kv-repl`), logging, debugging.
+    /// NOT a data-path bridge: the host-data registry is Arrow-backed as of R2,
+    /// and the hot extension→host path stays columnar end to end. Cold/display
+    /// paths only.
     pub fn to_json_rows(&self) -> Result<Vec<Value>, Error> {
         if self.frame_ipc.is_empty() {
             return Ok(Vec::new());
