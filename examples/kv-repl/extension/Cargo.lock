@@ -198,6 +198,7 @@ dependencies = [
  "arrow-array",
  "arrow-ipc",
  "arrow-schema",
+ "serde_json",
  "thiserror",
 ]
 

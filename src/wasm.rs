@@ -386,22 +386,27 @@ impl wit_host_data::HostCursor for State {
         &mut self,
         self_: wasmtime::component::Resource<wit_host_data::Cursor>,
         batch_size: u32,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<Option<Vec<u8>>, String> {
         let cursor = self
             .table
             .get_mut(&self_)
             .map_err(|e| format!("resource table get: {e}"))?;
-        let slice = self
+        // Cheap Arc-backed clone of the decoded frame; the window is sliced
+        // zero-copy and only the emitted batch is encoded to IPC bytes.
+        let frame = self
             .data
-            .slice(&cursor.resource_id, cursor.offset, batch_size as usize)
+            .frame(&cursor.resource_id)
             .ok_or_else(|| format!("unknown resource: {}", cursor.resource_id))?;
-        if slice.is_empty() {
-            return Ok(None);
+        match frame
+            .batch_ipc(cursor.offset, batch_size as usize)
+            .map_err(|e| format!("encode batch: {e}"))?
+        {
+            None => Ok(None),
+            Some((bytes, rows)) => {
+                cursor.offset += rows;
+                Ok(Some(bytes))
+            }
         }
-        cursor.offset += slice.len();
-        let body = serde_json::Value::Array(slice);
-        let s = serde_json::to_string(&body).map_err(|e| format!("serialize batch: {e}"))?;
-        Ok(Some(s))
     }
 
     async fn close(&mut self, _handle: wasmtime::component::Resource<wit_host_data::Cursor>) {

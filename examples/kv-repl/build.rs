@@ -14,6 +14,11 @@ fn main() {
     println!("cargo::rerun-if-changed=extension/manifest.toml");
     println!("cargo::rerun-if-changed=extension/icon.svg");
     println!("cargo::rerun-if-changed=extension/icon-square.svg");
+    // The extension is built against the shared WIT contract and the guest SDK;
+    // a change to either must re-package the component (the SDK is a path dep
+    // cargo-component recompiles, but build-script reruns are keyed separately).
+    println!("cargo::rerun-if-changed=extension/wit/extension.wit");
+    println!("cargo::rerun-if-changed=../../sdk/src/lib.rs");
 
     // Build the extension with cargo-component
     let status = Command::new("cargo")

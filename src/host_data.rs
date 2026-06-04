@@ -9,7 +9,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use emporium_core::column;
+use emporium_core::tool::data_frame::StoredFrame;
+use emporium_core::{Error, column};
 
 /// A registry of host-managed data resources that extensions can stream via
 /// cursors. Populated by the host application before loading an extension.
@@ -22,11 +23,13 @@ pub struct DataRegistry {
     inner: Arc<RwLock<HashMap<String, ResourceData>>>,
 }
 
-/// Row-oriented data plus its schema, held under a stable resource id.
+/// A decoded Arrow frame plus its declared schema, held under a stable resource
+/// id. The frame is decoded once at [`DataRegistry::register`]; windows are
+/// sliced zero-copy per cursor `next-batch`.
 #[derive(Clone)]
 struct ResourceData {
     schema: Vec<column::Def>,
-    rows: Vec<serde_json::Value>,
+    frame: StoredFrame,
 }
 
 impl DataRegistry {
@@ -35,16 +38,20 @@ impl DataRegistry {
         Self::default()
     }
 
-    /// Register a resource with its schema and row data. Subsequent calls
-    /// with the same `id` replace the prior entry.
-    pub fn register(&self, id: impl Into<String>, schema: Vec<column::Def>, rows: Vec<serde_json::Value>) {
+    /// Register a resource from its declared schema and an Arrow IPC buffer.
+    /// The buffer is decoded once into a [`StoredFrame`]; subsequent calls with
+    /// the same `id` replace the prior entry. Errors if the buffer is not a
+    /// valid Arrow IPC stream.
+    pub fn register(&self, id: impl Into<String>, schema: Vec<column::Def>, frame_ipc: &[u8]) -> Result<(), Error> {
         let id = id.into();
-        let data = ResourceData { schema, rows };
+        let frame = StoredFrame::from_ipc(frame_ipc)?;
+        let data = ResourceData { schema, frame };
         let mut guard = match self.inner.write() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
         guard.insert(id, data);
+        Ok(())
     }
 
     /// Return a clone of the schema registered under `id`, if any.
@@ -57,28 +64,24 @@ impl DataRegistry {
     }
 
     /// Return the total number of rows registered under `id`, if any.
-    pub(crate) fn row_count(&self, id: &str) -> Option<u64> {
+    pub fn row_count(&self, id: &str) -> Option<u64> {
         let guard = match self.inner.read() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        guard.get(id).map(|rd| rd.rows.len() as u64)
+        guard.get(id).map(|rd| rd.frame.row_count() as u64)
     }
 
-    /// Return up to `batch_size` rows starting at `offset`, or `None` if
-    /// the resource id is unknown. An empty `Vec` signals EOF to callers.
-    pub(crate) fn slice(&self, id: &str, offset: usize, batch_size: usize) -> Option<Vec<serde_json::Value>> {
+    /// Return a cheap handle to the decoded frame for `id` (polars frames are
+    /// `Arc`-backed, so the clone bumps refcounts — it does not copy buffers),
+    /// or `None` if the resource id is unknown. The cursor slices windows off
+    /// the returned handle via [`StoredFrame::batch_ipc`].
+    pub(crate) fn frame(&self, id: &str) -> Option<StoredFrame> {
         let guard = match self.inner.read() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let rd = guard.get(id)?;
-        let len = rd.rows.len();
-        if offset >= len {
-            return Some(Vec::new());
-        }
-        let end = (offset + batch_size).min(len);
-        Some(rd.rows[offset..end].to_vec())
+        guard.get(id).map(|rd| rd.frame.clone())
     }
 }
 
@@ -122,69 +125,94 @@ mod tests {
         }]
     }
 
-    fn sample_rows() -> Vec<serde_json::Value> {
-        vec![
-            serde_json::json!({"key": "a"}),
-            serde_json::json!({"key": "b"}),
-            serde_json::json!({"key": "c"}),
-            serde_json::json!({"key": "d"}),
-        ]
+    /// Four single-column rows, encoded to an Arrow IPC buffer the way an
+    /// extension would hand them in.
+    fn sample_ipc() -> Vec<u8> {
+        let data = serde_json::json!([
+            {"key": "a"}, {"key": "b"}, {"key": "c"}, {"key": "d"},
+        ]);
+        emporium_core::tool::data_frame::to_arrow_ipc(&sample_schema(), &data).expect("encode sample frame")
+    }
+
+    /// Decode a batch buffer back to a polars frame to assert its height.
+    fn batch_height(bytes: &[u8]) -> usize {
+        emporium_core::tool::data_frame::from_arrow_ipc(bytes)
+            .expect("decode batch")
+            .height()
     }
 
     #[test]
-    fn register_and_slice_returns_rows_and_advances() {
+    fn register_and_batch_windows_advance() {
         let reg = DataRegistry::new();
-        reg.register("keys", sample_schema(), sample_rows());
+        reg.register("keys", sample_schema(), &sample_ipc()).expect("register");
 
         assert_eq!(reg.row_count("keys"), Some(4));
         assert_eq!(reg.schema("keys").map(|s| s.len()), Some(1));
 
-        let first = reg.slice("keys", 0, 2).expect("resource exists");
-        assert_eq!(first.len(), 2);
-        assert_eq!(first[0], serde_json::json!({"key": "a"}));
-        assert_eq!(first[1], serde_json::json!({"key": "b"}));
+        let frame = reg.frame("keys").expect("resource exists");
 
-        let second = reg.slice("keys", 2, 2).expect("resource exists");
-        assert_eq!(second.len(), 2);
-        assert_eq!(second[0], serde_json::json!({"key": "c"}));
-        assert_eq!(second[1], serde_json::json!({"key": "d"}));
+        let (b0, n0) = frame.batch_ipc(0, 2).unwrap().expect("first window");
+        assert_eq!(n0, 2);
+        assert_eq!(batch_height(&b0), 2);
 
-        // Past-end slice yields an empty vec (EOF), not None.
-        let eof = reg.slice("keys", 4, 2).expect("resource exists");
-        assert!(eof.is_empty());
+        let (b1, n1) = frame.batch_ipc(2, 2).unwrap().expect("second window");
+        assert_eq!(n1, 2);
+        assert_eq!(batch_height(&b1), 2);
+
+        // Past-end window yields None (EOF).
+        assert!(frame.batch_ipc(4, 2).unwrap().is_none());
     }
 
     #[test]
     fn unknown_resource_returns_none() {
         let reg = DataRegistry::new();
-        assert!(reg.slice("missing", 0, 10).is_none());
+        assert!(reg.frame("missing").is_none());
         assert!(reg.schema("missing").is_none());
         assert!(reg.row_count("missing").is_none());
     }
 
     #[test]
-    fn slice_larger_than_remaining_truncates() {
+    fn tail_window_truncates_to_remaining() {
         let reg = DataRegistry::new();
-        reg.register("keys", sample_schema(), sample_rows());
-        let rows = reg.slice("keys", 3, 100).expect("resource exists");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0], serde_json::json!({"key": "d"}));
+        reg.register("keys", sample_schema(), &sample_ipc()).expect("register");
+        let frame = reg.frame("keys").expect("resource exists");
+        let (bytes, n) = frame.batch_ipc(3, 100).unwrap().expect("tail window");
+        assert_eq!(n, 1);
+        assert_eq!(batch_height(&bytes), 1);
     }
 
     #[test]
     fn register_replaces_existing_entry() {
         let reg = DataRegistry::new();
-        reg.register("x", sample_schema(), sample_rows());
+        reg.register("x", sample_schema(), &sample_ipc()).expect("register");
         assert_eq!(reg.row_count("x"), Some(4));
-        reg.register("x", sample_schema(), vec![serde_json::json!({"key": "z"})]);
+        let one = emporium_core::tool::data_frame::to_arrow_ipc(&sample_schema(), &serde_json::json!([{"key": "z"}]))
+            .expect("encode one row");
+        reg.register("x", sample_schema(), &one).expect("re-register");
         assert_eq!(reg.row_count("x"), Some(1));
+    }
+
+    #[test]
+    fn empty_buffer_registers_as_zero_rows() {
+        let reg = DataRegistry::new();
+        reg.register("empty", sample_schema(), &[])
+            .expect("register placeholder");
+        assert_eq!(reg.row_count("empty"), Some(0));
+        assert!(reg.frame("empty").unwrap().batch_ipc(0, 10).unwrap().is_none());
+    }
+
+    #[test]
+    fn register_rejects_garbage_ipc() {
+        let reg = DataRegistry::new();
+        assert!(reg.register("bad", sample_schema(), b"not an arrow stream").is_err());
     }
 
     #[test]
     fn data_registry_clones_share_backing_store() {
         let reg = DataRegistry::new();
         let clone = reg.clone();
-        reg.register("shared", sample_schema(), sample_rows());
+        reg.register("shared", sample_schema(), &sample_ipc())
+            .expect("register");
         assert_eq!(clone.row_count("shared"), Some(4));
     }
 }

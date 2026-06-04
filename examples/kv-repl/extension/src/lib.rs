@@ -536,14 +536,14 @@ fn analyze_keys() -> Result<String, String> {
     let mut freqs: BTreeMap<char, u32> = BTreeMap::new();
     loop {
         match cursor.next_batch(64) {
-            Ok(Some(batch_json)) => {
-                let rows: Vec<Value> =
-                    serde_json::from_str(&batch_json).map_err(|err| format!("parse batch: {err}"))?;
-                for row in rows {
-                    if let Some(key) = row.get("key").and_then(Value::as_str) {
-                        for ch in key.chars() {
-                            *freqs.entry(ch).or_insert(0) += 1;
-                        }
+            // The batch crosses as an Arrow IPC buffer now (R2). The `kv-keys`
+            // resource exposes its key column under the display alias "Key".
+            Ok(Some(batch_ipc)) => {
+                let keys = emporium_sdk::column_strings(&batch_ipc, "Key")
+                    .map_err(|err| format!("decode batch: {err}"))?;
+                for key in keys.into_iter().flatten() {
+                    for ch in key.chars() {
+                        *freqs.entry(ch).or_insert(0) += 1;
                     }
                 }
             }

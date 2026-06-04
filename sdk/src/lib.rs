@@ -26,7 +26,11 @@
 
 use std::sync::Arc;
 
-use arrow_array::{Array, ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray};
+use arrow_array::{
+    Array, ArrayRef, BooleanArray, Float64Array, Int64Array, LargeStringArray, RecordBatch, StringArray,
+    StringViewArray,
+};
+use arrow_ipc::reader::FileReader;
 use arrow_ipc::writer::FileWriter;
 use arrow_schema::{DataType, Field, Schema};
 
@@ -311,10 +315,91 @@ pub fn data_frame_ipc(schema: &[ColumnDef], data: &serde_json::Value) -> Result<
     Ok(builder.build()?.into_parts().1)
 }
 
+/// Read a string column's cells from an Arrow IPC buffer by its field name (the
+/// column **alias** — that's the Arrow field name [`FrameBuilder`] writes). The
+/// read counterpart to the builder, for consuming host-data cursor batches
+/// without naming arrow-rs in the extension. Accepts every Arrow string
+/// encoding the two sides produce — `Utf8` (the SDK builder), `LargeUtf8`, and
+/// `Utf8View` (what polars on the host emits) — so it reads a batch regardless
+/// of who wrote it. Concatenates across record batches; a null cell is `None`.
+/// Errors if the column is absent or not a string type.
+pub fn column_strings(arrow_ipc: &[u8], field: &str) -> Result<Vec<Option<String>>, Error> {
+    /// Append every cell of a string-like Arrow array to `out` (`None` for nulls).
+    /// Works for any array whose `value(i) -> &str`.
+    macro_rules! collect {
+        ($arr:expr, $out:expr) => {{
+            let arr = $arr;
+            $out.reserve(arr.len());
+            for i in 0..arr.len() {
+                $out.push((!arr.is_null(i)).then(|| arr.value(i).to_string()));
+            }
+        }};
+    }
+
+    let reader = FileReader::try_new(std::io::Cursor::new(arrow_ipc), None).map_err(|e| Error::Arrow(e.to_string()))?;
+    let mut out = Vec::new();
+    for batch in reader {
+        let batch = batch.map_err(|e| Error::Arrow(e.to_string()))?;
+        let idx = batch
+            .schema()
+            .index_of(field)
+            .map_err(|e| Error::Arrow(format!("column '{field}': {e}")))?;
+        let col = batch.column(idx);
+        match col.data_type() {
+            DataType::Utf8 => collect!(col.as_any().downcast_ref::<StringArray>().expect("Utf8 array"), out),
+            DataType::LargeUtf8 => collect!(
+                col.as_any()
+                    .downcast_ref::<LargeStringArray>()
+                    .expect("LargeUtf8 array"),
+                out
+            ),
+            DataType::Utf8View => collect!(
+                col.as_any().downcast_ref::<StringViewArray>().expect("Utf8View array"),
+                out
+            ),
+            other => {
+                return Err(Error::Arrow(format!(
+                    "column '{field}' is {other:?}, expected a string type"
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use emporium_core::tool::data_frame::from_arrow_ipc;
+
+    #[test]
+    fn column_strings_reads_sdk_utf8_and_polars_utf8view() {
+        let want = vec![Some("ab".to_string()), None, Some("c".to_string())];
+
+        // SDK builder side: Arrow `Utf8`. Read back by the column alias.
+        let frame = Frame::builder()
+            .text("k", "Key", [Some("ab".to_string()), None, Some("c".to_string())])
+            .build()
+            .unwrap();
+        assert_eq!(column_strings(frame.arrow_ipc(), "Key").unwrap(), want);
+
+        // Host side: polars encodes string columns as `Utf8View` — the buffer a
+        // host-data cursor actually yields. column_strings must read it too.
+        let core_schema = vec![emporium_core::column::Def {
+            name: "k".into(),
+            alias: "Key".into(),
+            dtype: "string".into(),
+        }];
+        let ipc = emporium_core::tool::data_frame::to_arrow_ipc(
+            &core_schema,
+            &serde_json::json!([{"k": "ab"}, {"k": null}, {"k": "c"}]),
+        )
+        .unwrap();
+        assert_eq!(column_strings(&ipc, "Key").unwrap(), want);
+
+        // A missing column is an error, not a silent empty.
+        assert!(column_strings(frame.arrow_ipc(), "nope").is_err());
+    }
 
     #[test]
     fn data_frame_ipc_dynamic_row_oriented_bit_exact() {

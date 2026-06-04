@@ -76,7 +76,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // extension worker and retained here in the REPL, so `sync-keys` writes
     // become visible to the extension's cursor reads.
     let registry = DataRegistry::new();
-    registry.register(KV_KEYS_RESOURCE, kv_keys_schema(), Vec::new());
+    registry
+        .register(KV_KEYS_RESOURCE, kv_keys_schema(), &[])
+        .expect("register empty kv-keys placeholder");
 
     let ext = Extension::load_with_data(&path, json!({}), registry.clone()).await?;
 
@@ -595,16 +597,13 @@ async fn sync_keys_silent(ext: &Extension, registry: &DataRegistry) -> Option<us
         }
     };
 
-    let rows: Vec<serde_json::Value> = match df.to_json_rows() {
-        Ok(rows) => rows,
-        Err(err) => {
-            println!("Failed to decode list_keys frame: {err}");
-            return None;
-        }
-    };
-
-    let count = rows.len();
-    registry.register(KV_KEYS_RESOURCE, kv_keys_schema(), rows);
+    // Register the extension's Arrow buffer directly — no JSON round-trip. The
+    // registry decodes it once; the cursor slices windows off it.
+    if let Err(err) = registry.register(KV_KEYS_RESOURCE, kv_keys_schema(), &df.frame_ipc) {
+        println!("Failed to register list_keys frame: {err}");
+        return None;
+    }
+    let count = registry.row_count(KV_KEYS_RESOURCE).unwrap_or(0) as usize;
     Some(count)
 }
 

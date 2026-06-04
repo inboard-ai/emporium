@@ -47,7 +47,9 @@ async fn loads_lists_and_executes_kv_tools() {
 #[tokio::test(flavor = "current_thread")]
 async fn progress_event_fanned_out_to_subscribers() {
     let registry = DataRegistry::new();
-    registry.register("kv-keys", kv_keys_schema(), vec![json!({"key": "x"})]);
+    registry
+        .register("kv-keys", kv_keys_schema(), &kv_keys_ipc(json!([{"key": "x"}])))
+        .expect("register kv-keys");
 
     let bytes = std::fs::read(KV_EXTENSION_PATH).expect("read kv extension bytes");
     let ext = Extension::from_bytes_with_data(&bytes, json!({}), registry)
@@ -346,14 +348,22 @@ fn kv_keys_schema() -> Vec<column::Def> {
     }]
 }
 
+/// Encode JSON rows to an Arrow IPC buffer the way an extension hands data in,
+/// for seeding the host-data registry in tests.
+fn kv_keys_ipc(rows: serde_json::Value) -> Vec<u8> {
+    emporium_core::tool::data_frame::to_arrow_ipc(&kv_keys_schema(), &rows).expect("encode kv-keys frame")
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn host_data_cursor_analyze_returns_computed_frequencies() {
     let registry = DataRegistry::new();
-    registry.register("kv-keys", kv_keys_schema(), vec![
-        json!({"key": "abc"}),
-        json!({"key": "ab"}),
-        json!({"key": "c"}),
-    ]);
+    registry
+        .register(
+            "kv-keys",
+            kv_keys_schema(),
+            &kv_keys_ipc(json!([{"key": "abc"}, {"key": "ab"}, {"key": "c"}])),
+        )
+        .expect("register kv-keys");
 
     let bytes = std::fs::read(KV_EXTENSION_PATH).expect("read kv extension bytes");
     let ext = Extension::from_bytes_with_data(&bytes, json!({}), registry)
@@ -387,7 +397,9 @@ async fn host_data_cursor_analyze_returns_computed_frequencies() {
 #[tokio::test(flavor = "current_thread")]
 async fn host_data_cursor_add_and_analyze_returns_state_update_with_computed() {
     let registry = DataRegistry::new();
-    registry.register("kv-keys", kv_keys_schema(), vec![json!({"key": "hello"})]);
+    registry
+        .register("kv-keys", kv_keys_schema(), &kv_keys_ipc(json!([{"key": "hello"}])))
+        .expect("register kv-keys");
 
     let bytes = std::fs::read(KV_EXTENSION_PATH).expect("read kv extension bytes");
     let ext = Extension::from_bytes_with_data(&bytes, json!({}), registry)
@@ -428,7 +440,9 @@ async fn host_data_cursor_add_and_analyze_returns_state_update_with_computed() {
 #[tokio::test(flavor = "current_thread")]
 async fn host_data_cursor_empty_resource_yields_empty_frequencies() {
     let registry = DataRegistry::new();
-    registry.register("kv-keys", kv_keys_schema(), Vec::new());
+    registry
+        .register("kv-keys", kv_keys_schema(), &[])
+        .expect("register empty kv-keys");
 
     let bytes = std::fs::read(KV_EXTENSION_PATH).expect("read kv extension bytes");
     let ext = Extension::from_bytes_with_data(&bytes, json!({}), registry)

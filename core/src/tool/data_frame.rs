@@ -411,6 +411,60 @@ pub fn from_arrow_ipc(bytes: &[u8]) -> Result<polars_core::frame::DataFrame, Err
         .map_err(|e| Error::DataFrame(format!("Arrow IPC read failed: {e}")))
 }
 
+/// A decoded, sliceable Arrow frame for the host-data registry (R2). Wraps a
+/// polars `DataFrame` so the host crate can window host-managed data zero-copy
+/// **without naming polars itself** — keeping the polars dependency contained in
+/// `emporium-core`, the same boundary the guest enforces.
+///
+/// Lifecycle: decode once on `register` ([`Self::from_ipc`]), then slice per
+/// cursor `next-batch` ([`Self::batch_ipc`]). The slice is a zero-copy view that
+/// shares the underlying Arrow buffers; only the emitted window is copied, and
+/// only when it is re-encoded to an IPC batch for the WIT boundary.
+#[derive(Clone)]
+pub struct StoredFrame {
+    frame: polars_core::frame::DataFrame,
+}
+
+impl StoredFrame {
+    /// Decode an Arrow IPC buffer into a stored frame — one decode per
+    /// `register`, amortized across every subsequent window. An empty buffer
+    /// yields an empty frame (mirroring [`DataFrame::to_dataframe`]), so callers
+    /// can register a placeholder resource before any rows exist.
+    pub fn from_ipc(bytes: &[u8]) -> Result<Self, Error> {
+        let frame = if bytes.is_empty() {
+            polars_core::frame::DataFrame::empty()
+        } else {
+            from_arrow_ipc(bytes)?
+        };
+        Ok(Self { frame })
+    }
+
+    /// Total number of rows held.
+    pub fn row_count(&self) -> usize {
+        self.frame.height()
+    }
+
+    /// Encode the window `[offset, offset + len)` as a standalone Arrow IPC
+    /// batch. Returns `None` at or past EOF (and for a zero-length request,
+    /// mirroring the legacy empty-slice EOF signal); otherwise the IPC bytes plus
+    /// the number of rows actually emitted (which may be `< len` at the tail) so
+    /// the caller can advance its cursor offset. The `slice` is a zero-copy view;
+    /// only the window pays a copy, when written to IPC.
+    pub fn batch_ipc(&self, offset: usize, len: usize) -> Result<Option<(Vec<u8>, usize)>, Error> {
+        let height = self.frame.height();
+        if offset >= height || len == 0 {
+            return Ok(None);
+        }
+        let take = len.min(height - offset);
+        let mut window = self.frame.slice(offset as i64, take);
+        let mut buf = Vec::new();
+        IpcWriter::new(&mut buf)
+            .finish(&mut window)
+            .map_err(|e| Error::DataFrame(format!("Arrow IPC batch write failed: {e}")))?;
+        Ok(Some((buf, take)))
+    }
+}
+
 /// Convert a single polars `AnyValue` to a JSON value. Used by
 /// [`DataFrame::to_json_rows`]; covers the dtypes the JSON wire ever produced
 /// (text / number / bool / null), with a stringified fallback for the rest.

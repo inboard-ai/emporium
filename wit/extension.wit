@@ -139,7 +139,9 @@ interface host-data {
 
     resource cursor {
         open: static func(resource-id: string, query: string) -> result<cursor, string>;
-        next-batch: func(batch-size: u32) -> result<option<string>, string>;
+        // Yields up to `batch-size` rows as one Arrow IPC batch buffer (R2 —
+        // was a JSON string). `none` signals EOF.
+        next-batch: func(batch-size: u32) -> result<option<list<u8>>, string>;
         close: func();
     }
 
