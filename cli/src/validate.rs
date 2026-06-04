@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use semver::Version;
 use serde::Deserialize;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -246,22 +247,116 @@ fn validate_world(world: &Option<String>) -> Result<()> {
     Ok(())
 }
 
-/// Validate manifest tools against the WASM component's runtime tool list.
+/// Validate manifest `[[tools]]` against the component's runtime tool list.
 ///
-/// Loads the WASM component, calls `list_tools()`, and diffs against
-/// the manifest `[[tools]]` declarations.
+/// Builds a minimal in-memory package from the manifest + built WASM, loads it
+/// through the emporium host (which instantiates the component in wasmtime),
+/// calls `list_tools()`, and diffs against the manifest's declared tools. Bails
+/// on any drift — a tool declared but not exported, exported but not declared,
+/// or whose name disagrees.
+///
+/// The tool list is produced by guest code at runtime, so there is no static
+/// shortcut: the component must actually run. `init` is called with an empty
+/// config, which suits config-less extensions; a credentialed extension whose
+/// `init` rejects an empty config reports a load error here.
 pub fn validate_check_sync(path: &Path) -> Result<()> {
-    let manifest = validate_manifest(path)?;
+    // Validate manifest + wasm, then read both for an in-memory package.
+    let manifest = validate_extension(path)?;
+    let manifest_toml = fs::read_to_string(path.join("manifest.toml"))?;
+    let wasm_path = path.join(&manifest.component.entry);
+    let wasm_bytes = fs::read(&wasm_path).with_context(|| format!("Failed to read WASM at {}", wasm_path.display()))?;
 
-    let tools = manifest.tools.as_ref().map_or(0, |t| t.len());
+    // Declared tools: id -> name, from the manifest [[tools]] tables.
+    let declared: BTreeMap<String, String> = manifest
+        .tools
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|t| {
+            let id = t.get("id").and_then(|v| v.as_str())?.to_string();
+            let name = t.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            Some((id, name))
+        })
+        .collect();
 
-    // For now, just validate the manifest side.
-    // Full WASM loading + list_tools() diffing requires the emporium host
-    // crate, which is a heavy dependency. Log what we would check.
-    eprintln!("info: manifest declares {} tools", tools);
-    eprintln!("info: --check-sync requires loading the WASM component (not yet implemented)");
-    eprintln!("hint: use 'cargo emporium validate' for manifest-only validation");
+    // Runtime tools: load the component and ask it.
+    let exported: BTreeMap<String, String> = load_tool_list(&manifest_toml, &wasm_bytes)?
+        .into_iter()
+        .map(|t| (t.id, t.name))
+        .collect();
 
+    // Diff by id, plus name mismatches on shared ids.
+    let declared_ids: BTreeSet<&String> = declared.keys().collect();
+    let exported_ids: BTreeSet<&String> = exported.keys().collect();
+
+    let only_in_manifest: Vec<&&String> = declared_ids.difference(&exported_ids).collect();
+    let only_in_component: Vec<&&String> = exported_ids.difference(&declared_ids).collect();
+    let name_mismatches: Vec<(&String, &String, &String)> = declared
+        .iter()
+        .filter_map(|(id, dname)| {
+            exported
+                .get(id)
+                .filter(|ename| *ename != dname)
+                .map(|ename| (id, dname, ename))
+        })
+        .collect();
+
+    for id in &only_in_manifest {
+        eprintln!("drift: manifest declares tool '{id}' but the component does not export it");
+    }
+    for id in &only_in_component {
+        eprintln!("drift: component exports tool '{id}' but the manifest does not declare it");
+    }
+    for (id, dname, ename) in &name_mismatches {
+        eprintln!("drift: tool '{id}' name differs — manifest \"{dname}\", component \"{ename}\"");
+    }
+
+    if !only_in_manifest.is_empty() || !only_in_component.is_empty() || !name_mismatches.is_empty() {
+        bail!(
+            "manifest is out of sync with the component ({} declared, {} exported)",
+            declared.len(),
+            exported.len()
+        );
+    }
+
+    println!("In sync: {} tools match the component.", declared.len());
+    Ok(())
+}
+
+/// Build a minimal `.empkg` (manifest.toml + extension.wasm only) in memory and
+/// load it through the host to read the runtime tool list. The host's package
+/// reader needs just those two entries, so icons/readme — packaging concerns —
+/// are skipped here.
+fn load_tool_list(manifest_toml: &str, wasm_bytes: &[u8]) -> Result<Vec<emporium_core::tool::Info>> {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use tar::Builder;
+
+    let gz = GzEncoder::new(Vec::new(), Compression::fast());
+    let mut ar = Builder::new(gz);
+    append_file(&mut ar, "check-sync/manifest.toml", manifest_toml.as_bytes())?;
+    append_file(&mut ar, "check-sync/extension.wasm", wasm_bytes)?;
+    let pkg = ar.into_inner()?.finish()?;
+
+    let rt = tokio::runtime::Runtime::new().context("failed to start async runtime")?;
+    rt.block_on(async {
+        let ext = emporium::Extension::from_bytes(&pkg, serde_json::json!({}))
+            .await
+            .context(
+                "failed to load the component (check-sync runs the extension's init with an empty \
+                 config; a credentialed extension may reject that)",
+            )?;
+        ext.list_tools().await.context("list_tools() failed")
+    })
+}
+
+/// Append in-memory bytes to a tar archive as a 0644 file.
+fn append_file<W: std::io::Write>(ar: &mut tar::Builder<W>, path: &str, data: &[u8]) -> Result<()> {
+    let mut header = tar::Header::new_gnu();
+    header.set_size(data.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    ar.append_data(&mut header, path, data)?;
     Ok(())
 }
 

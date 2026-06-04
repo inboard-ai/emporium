@@ -25,3 +25,10 @@ wasmparser = "0.221"
 thiserror = "1"
 anyhow = "1"
 ureq = "2"
+# `validate --check-sync` loads the built component and calls list_tools() to
+# diff against the manifest. cargo-emporium is a dev tool, so pulling the full
+# host runtime (wasmtime, via `emporium`) is fine — the whole extension
+# lifecycle (build/validate/package/check) stays in one CLI.
+emporium = { path = ".." }
+emporium-core = { path = "../core" }
+tokio = { version = "1", features = ["rt-multi-thread"] }

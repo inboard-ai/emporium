@@ -92,8 +92,8 @@ fn main() -> Result<()> {
                     validate::validate_check_sync(&extension_path)?;
                 } else {
                     validate::validate_extension(&extension_path)?;
+                    println!("Extension is valid!");
                 }
-                println!("Extension is valid!");
             }
             EmporiumCommands::Check { path, registry } => {
                 let extension_path = path.unwrap_or_else(|| PathBuf::from("."));
