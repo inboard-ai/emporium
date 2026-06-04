@@ -1944,6 +1944,7 @@ dependencies = [
  "bitflags",
  "boxcar",
  "bytemuck",
+ "chrono",
  "either",
  "hashbrown 0.15.5",
  "indexmap",
@@ -1957,6 +1958,7 @@ dependencies = [
  "polars-schema",
  "polars-utils",
  "rayon",
+ "regex",
  "strum_macros",
  "uuid",
  "version_check",
@@ -1985,6 +1987,7 @@ checksum = "b9cb5d98f59f8b94673ee391840440ad9f0d2170afced95fc98aa86f895563c0"
 dependencies = [
  "parking_lot",
  "polars-arrow-format",
+ "regex",
  "signal-hook",
  "simdutf8",
 ]

@@ -8,7 +8,9 @@ license = "MIT"
 
 [dependencies]
 emporium-types.workspace = true
-polars-core = { version = "0.51", default-features = false }
+# `dtype-date` compiles in the Date logical type (i32 days) so the IPC reader can
+# build a Date series from a guest's native Arrow Date32 column (R2c temporal).
+polars-core = { version = "0.51", default-features = false, features = ["dtype-date"] }
 # IPC (Arrow) codec for the data-frame wire format. `ipc` is the only feature
 # we need; default-features off keeps the dependency surface tight.
 polars-io = { version = "0.51", default-features = false, features = ["ipc"] }

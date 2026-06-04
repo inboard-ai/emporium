@@ -27,7 +27,7 @@
 use std::sync::Arc;
 
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, Float64Array, Int64Array, LargeStringArray, RecordBatch, StringArray,
+    Array, ArrayRef, BooleanArray, Date32Array, Float64Array, Int64Array, LargeStringArray, RecordBatch, StringArray,
     StringViewArray,
 };
 use arrow_ipc::reader::FileReader;
@@ -137,8 +137,10 @@ impl FrameBuilder {
         self.push(name, alias, "string", DataType::Utf8, Arc::new(array))
     }
 
-    /// Append a date column (Arrow `Utf8`, dtype `"date"`). Date cells are
-    /// carried as strings, matching the host's existing date handling.
+    /// Append a date column as **strings** (Arrow `Utf8`, dtype `"date"`). The
+    /// `Utf8` fallback for ambiguous or fiscal periods ("2024 Q1", "FY2024")
+    /// that are not lossless calendar dates. For real calendar dates prefer
+    /// [`Self::date32`] (or the dynamic [`data_frame_ipc`], which auto-detects).
     pub fn date(
         self,
         name: impl Into<String>,
@@ -147,6 +149,22 @@ impl FrameBuilder {
     ) -> Self {
         let array: StringArray = values.into_iter().map(Into::into).collect();
         self.push(name, alias, "date", DataType::Utf8, Arc::new(array))
+    }
+
+    /// Append a native date column (Arrow `Date32`, dtype `"date"`) from
+    /// **days since the Unix epoch** (1970-01-01 = 0). Use when the source API
+    /// returns epoch days or an unambiguous calendar date — it lands on the host
+    /// as a real temporal column (a cube time-dimension, no host sniffing) and
+    /// is smaller than the string form. For ISO strings, [`iso_date_to_days`]
+    /// converts; for ambiguous periods keep [`Self::date`].
+    pub fn date32(
+        self,
+        name: impl Into<String>,
+        alias: impl Into<String>,
+        values: impl IntoIterator<Item = impl Into<Option<i32>>>,
+    ) -> Self {
+        let array: Date32Array = values.into_iter().map(Into::into).collect();
+        self.push(name, alias, "date", DataType::Date32, Arc::new(array))
     }
 
     /// Append a floating-point column (Arrow `Float64`, dtype `"number"`).
@@ -239,6 +257,55 @@ impl FrameBuilder {
     }
 }
 
+/// Convert an ISO calendar date (`YYYY-MM-DD`) to days since the Unix epoch
+/// (1970-01-01 = 0) — the value an Arrow `Date32` cell holds. Returns `None` for
+/// anything that is not a strict `YYYY-MM-DD` date (e.g. "2024 Q1", "FY2024", or
+/// a timestamp), which is how the dynamic encoder decides whether a column is a
+/// real date. Zero-dependency by design — the SDK stays lean, so this is a
+/// hand-rolled civil-days conversion rather than a `chrono` dependency.
+pub fn iso_date_to_days(s: &str) -> Option<i32> {
+    let b = s.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    let y: i64 = s.get(0..4)?.parse().ok()?;
+    let m: u32 = s.get(5..7)?.parse().ok()?;
+    let d: u32 = s.get(8..10)?.parse().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    Some(days_from_civil(y, m, d) as i32)
+}
+
+/// Days from 1970-01-01 to the given proleptic-Gregorian civil date (`m` in
+/// 1..=12, `d` in 1..=31). Howard Hinnant's "chrono-Compatible Low-Level Date
+/// Algorithms" — exact for any year, no leap-year special-casing at the call
+/// site.
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let (m, d) = (m as i64, d as i64);
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + (d - 1); // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146097 + doe - 719468
+}
+
+/// Try to read a date column's cells as native epoch-days. Returns `Some` only
+/// if **every** non-null cell is a strict ISO date (policy B,
+/// `d:temporal-native-when-lossless` — atomic per column: one non-date cell
+/// keeps the whole column `Utf8`). Nulls stay null.
+fn try_iso_days(cells: &[Option<String>]) -> Option<Vec<Option<i32>>> {
+    let mut out = Vec::with_capacity(cells.len());
+    for c in cells {
+        match c {
+            None => out.push(None),
+            Some(s) => out.push(Some(iso_date_to_days(s)?)),
+        }
+    }
+    Some(out)
+}
+
 /// Build an Arrow IPC buffer from a **runtime** schema + JSON data — the dynamic
 /// counterpart to [`FrameBuilder`], for extensions whose columns are decided at
 /// runtime (SQL results, API responses). `data` may be row-oriented
@@ -249,8 +316,9 @@ impl FrameBuilder {
 ///
 /// Returns just the IPC bytes — the caller keeps its own schema for the
 /// `data-frame-output.schema` field. `dtype` drives extraction: `number|float`
-/// → f64, `integer|int` → i64, `boolean|bool` → bool, `date` → string, anything
-/// else → string.
+/// → f64, `integer|int` → i64, `boolean|bool` → bool, `date` → native `Date32`
+/// when every cell is a strict ISO date else `Utf8` (policy B), anything else →
+/// string.
 pub fn data_frame_ipc(schema: &[ColumnDef], data: &serde_json::Value) -> Result<Vec<u8>, Error> {
     use serde_json::Value;
 
@@ -308,7 +376,15 @@ pub fn data_frame_ipc(schema: &[ColumnDef], data: &serde_json::Value) -> Result<
             "number" | "float" => builder.number(name, alias, cells(data, &col.name, as_f64)),
             "integer" | "int" => builder.integer(name, alias, cells(data, &col.name, as_i64)),
             "boolean" | "bool" => builder.boolean(name, alias, cells(data, &col.name, as_bool)),
-            "date" => builder.date(name, alias, cells(data, &col.name, as_text)),
+            "date" => {
+                // Policy B (d:temporal-native-when-lossless): native Date32 when
+                // every cell parses as ISO, else keep the column as strings.
+                let strings = cells(data, &col.name, as_text);
+                match try_iso_days(&strings) {
+                    Some(days) => builder.date32(name, alias, days),
+                    None => builder.date(name, alias, strings),
+                }
+            }
             _ => builder.text(name, alias, cells(data, &col.name, as_text)),
         };
     }
@@ -399,6 +475,43 @@ mod tests {
 
         // A missing column is an error, not a silent empty.
         assert!(column_strings(frame.arrow_ipc(), "nope").is_err());
+    }
+
+    #[test]
+    fn iso_date_to_days_parses_strict_calendar_dates() {
+        assert_eq!(iso_date_to_days("1970-01-01"), Some(0));
+        assert_eq!(iso_date_to_days("1970-01-02"), Some(1));
+        assert_eq!(iso_date_to_days("1969-12-31"), Some(-1));
+        assert_eq!(iso_date_to_days("1970-02-01"), Some(31));
+        // 2000 was a leap year — Feb has 29 days.
+        assert_eq!(
+            iso_date_to_days("2000-03-01").unwrap() - iso_date_to_days("2000-02-01").unwrap(),
+            29
+        );
+        // Non-ISO / ambiguous → None (the column falls back to Utf8).
+        assert_eq!(iso_date_to_days("2024 Q1"), None);
+        assert_eq!(iso_date_to_days("FY2024"), None);
+        assert_eq!(iso_date_to_days("2024-13-01"), None);
+        assert_eq!(iso_date_to_days("2024-01-2"), None);
+    }
+
+    #[test]
+    fn data_frame_ipc_dates_native_when_lossless_else_string() {
+        let schema = vec![ColumnDef {
+            name: "d".into(),
+            alias: "D".into(),
+            dtype: "date".into(),
+        }];
+
+        // Every cell ISO → native Date32 (polars renders the dtype as "date").
+        let native = data_frame_ipc(&schema, &serde_json::json!([{"d": "2024-01-02"}, {"d": "2024-01-03"}])).unwrap();
+        let df = from_arrow_ipc(&native).unwrap();
+        assert_eq!(df.column("D").unwrap().dtype().to_string(), "date");
+
+        // One fiscal value → the whole column stays string (atomic fallback).
+        let mixed = data_frame_ipc(&schema, &serde_json::json!([{"d": "2024-01-02"}, {"d": "2024 Q1"}])).unwrap();
+        let df = from_arrow_ipc(&mixed).unwrap();
+        assert_ne!(df.column("D").unwrap().dtype().to_string(), "date");
     }
 
     #[test]

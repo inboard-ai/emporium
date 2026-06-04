@@ -124,10 +124,88 @@ impl DataFrame {
 
 /// Build a polars DataFrame from a column schema + JSON data value. Accepts
 /// row-oriented (`[{col: val, …}, …]`) or column-oriented (`{col: [val, …]}`)
-/// shapes. Feeds [`to_arrow_ipc`] and backs [`DataFrame::from_json`]; exposed
-/// so the wasm-boundary bench can time the legacy JSON→polars path directly
-/// against the Arrow path.
+/// shapes. Any `date`-declared column whose cells are all strict ISO dates is
+/// promoted to a native polars `Date` (policy B, `d:temporal-native-when-lossless`);
+/// a column with any non-ISO cell stays `String`. Feeds [`to_arrow_ipc`] and
+/// backs [`DataFrame::from_json`]; exposed so the wasm-boundary bench can time
+/// the JSON→polars path against the Arrow path.
 pub fn json_to_polars(schema: &[column::Def], data: &Value) -> Result<polars_core::frame::DataFrame, Error> {
+    let mut df = json_to_polars_columns(schema, data)?;
+    promote_native_dates(&mut df, schema)?;
+    Ok(df)
+}
+
+/// ISO `YYYY-MM-DD` → days since the Unix epoch; `None` for any non-ISO string
+/// (the column then stays `String`). Hand-rolled civil-days conversion to keep
+/// emporium-core off a `chrono` dependency. Mirrors
+/// `emporium_sdk::iso_date_to_days` — the two crates can't share it (the SDK
+/// must stay polars-free), so the algorithm is duplicated deliberately.
+fn iso_date_to_days(s: &str) -> Option<i32> {
+    let b = s.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    let y: i64 = s.get(0..4)?.parse().ok()?;
+    let m: u32 = s.get(5..7)?.parse().ok()?;
+    let d: u32 = s.get(8..10)?.parse().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    // Howard Hinnant's days-from-civil; exact for any year.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400;
+    let (mi, di) = (m as i64, d as i64);
+    let doy = (153 * (if mi > 2 { mi - 3 } else { mi + 9 }) + 2) / 5 + (di - 1);
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    i32::try_from(era * 146097 + doe - 719468).ok()
+}
+
+/// `Some(days)` only if **every** non-null cell is a strict ISO date (atomic per
+/// column — one non-date cell keeps the whole column `String`). Nulls stay null.
+fn try_iso_days(cells: &[Option<String>]) -> Option<Vec<Option<i32>>> {
+    let mut out = Vec::with_capacity(cells.len());
+    for c in cells {
+        match c {
+            None => out.push(None),
+            Some(s) => out.push(Some(iso_date_to_days(s)?)),
+        }
+    }
+    Some(out)
+}
+
+/// Replace each all-ISO `date`-declared `String` column with a native `Date`
+/// column. A column with any non-ISO cell is left untouched. Runs after the
+/// frame is fully built, so it never interacts with the null-resize logic.
+fn promote_native_dates(df: &mut polars_core::frame::DataFrame, schema: &[column::Def]) -> Result<(), Error> {
+    for col_def in schema {
+        if col_def.dtype != "date" {
+            continue;
+        }
+        let Ok(col) = df.column(col_def.alias.as_str()) else {
+            continue;
+        };
+        if !matches!(col.dtype(), DataType::String) {
+            continue;
+        }
+        let Ok(ca) = col.as_materialized_series().str() else {
+            continue;
+        };
+        let strings: Vec<Option<String>> = ca.into_iter().map(|o| o.map(str::to_string)).collect();
+        if let Some(days) = try_iso_days(&strings) {
+            let date = Series::new(col_def.alias.as_str().into(), days)
+                .cast(&DataType::Date)
+                .map_err(|e| Error::DataFrame(format!("cast '{}' to Date: {e}", col_def.alias)))?;
+            df.with_column(date)
+                .map_err(|e| Error::DataFrame(format!("replace '{}' with Date: {e}", col_def.alias)))?;
+        }
+    }
+    Ok(())
+}
+
+/// Build the polars columns from JSON without temporal promotion — the raw
+/// type-driven decode. [`json_to_polars`] wraps this and promotes native dates.
+fn json_to_polars_columns(schema: &[column::Def], data: &Value) -> Result<polars_core::frame::DataFrame, Error> {
     // Helper to convert string dtype to Polars DataType
     fn to_dtype(dtype: &str) -> DataType {
         match dtype {
@@ -681,5 +759,27 @@ mod tests {
     fn arrow_ipc_error_on_garbage_bytes() {
         let err = from_arrow_ipc(b"not an arrow ipc stream").unwrap_err();
         assert!(matches!(err, Error::DataFrame(_)));
+    }
+
+    #[test]
+    fn json_to_polars_promotes_all_iso_dates_else_keeps_string() {
+        let schema = vec![column::Def {
+            name: "d".to_string(),
+            alias: "D".to_string(),
+            dtype: "date".to_string(),
+        }];
+
+        // Every cell ISO → native polars Date.
+        let native = json_to_polars(&schema, &json!([{"d": "2024-01-02"}, {"d": "2024-01-03"}])).unwrap();
+        assert_eq!(native.column("D").unwrap().dtype().to_string(), "date");
+
+        // One fiscal period → the whole column stays String (atomic fallback).
+        let mixed = json_to_polars(&schema, &json!([{"d": "2024-01-02"}, {"d": "2024 Q1"}])).unwrap();
+        assert_ne!(mixed.column("D").unwrap().dtype().to_string(), "date");
+
+        // And the native date survives the Arrow IPC round-trip as a Date.
+        let ipc = to_arrow_ipc(&schema, &json!([{"d": "2024-01-02"}])).unwrap();
+        let decoded = from_arrow_ipc(&ipc).unwrap();
+        assert_eq!(decoded.column("D").unwrap().dtype().to_string(), "date");
     }
 }
