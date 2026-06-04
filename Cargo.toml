@@ -41,9 +41,9 @@ thiserror = "1.0.63"
 tokio = { version = "1.39.2", features = ["full"] }
 toml = "0.9.8"
 tracing = "0.1"
-wasmtime = "43.0"
-wasmtime-wasi = "43.0"
-wasmtime-wasi-http = "43.0"
+wasmtime = "44"
+wasmtime-wasi = "44"
+wasmtime-wasi-http = "44"
 
 [dev-dependencies]
 dotenvy = "0.15"

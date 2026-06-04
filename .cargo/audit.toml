@@ -1,16 +1,6 @@
 [advisories]
-# All of these are pinned by the wasmtime 43.0 stack — no fix without an
-# upstream wasmtime update (44.x). Remove these ignores when wasmtime bumps:
-#   0049 / 0104 / 0098 / 0099 — rustls-webpki 0.102.8 via
-#     wasmtime-wasi-http 43.0 → tokio-rustls 0.25 → rustls 0.22.4 (cert/CRL
-#     parsing + name-constraint issues; the 0.103 line is already patched).
-#   0149 — wasmtime-wasi path_open(TRUNCATE) bypasses FilePerms::WRITE; no 43.x
-#     fix (needs 44.0.2). Not reachable here: extensions get no writable WASI
-#     preopens (WasiCtxBuilder grants only inherited stdio).
-ignore = [
-    "RUSTSEC-2026-0049",
-    "RUSTSEC-2026-0098",
-    "RUSTSEC-2026-0099",
-    "RUSTSEC-2026-0104",
-    "RUSTSEC-2026-0149",
-]
+# No ignores: the wasmtime 44 bump cleared the whole 43.0-stack cluster
+# (rustls-webpki 0.102 cert/CRL advisories + the wasmtime-wasi path_open
+# TRUNCATE write-perm bypass). Keep this empty — add an entry only with a
+# tracked upstream rationale.
+ignore = []

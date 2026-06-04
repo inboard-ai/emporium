@@ -1,18 +1,9 @@
 [advisories]
 unmaintained = "workspace"
 yanked = "warn"
-# All pinned by the wasmtime 43.0 stack; no fix without an upstream wasmtime
-# bump (44.x). Remove when wasmtime updates. 0049/0104/0098/0099: rustls-webpki
-# 0.102.8 via wasmtime-wasi-http 43.0 -> tokio-rustls 0.25 -> rustls 0.22.
-# 0149: wasmtime-wasi path_open(TRUNCATE) write-perm bypass; no 43.x fix, and
-# not reachable here (extensions get no writable WASI preopens).
-ignore = [
-    "RUSTSEC-2026-0049",
-    "RUSTSEC-2026-0098",
-    "RUSTSEC-2026-0099",
-    "RUSTSEC-2026-0104",
-    "RUSTSEC-2026-0149",
-]
+# No ignores: the wasmtime 44 bump moved off the old rustls 0.22 stack and
+# patched wasmtime-wasi, clearing the whole cluster. Keep empty.
+ignore = []
 
 [licenses]
 allow = [
