@@ -257,16 +257,17 @@ fn validate_world(world: &Option<String>) -> Result<()> {
 ///
 /// The tool list is produced by guest code at runtime, so there is no static
 /// shortcut: the component must actually run, which means `init` runs. Config
-/// comes from `config_path` (a JSON file); when none is given and the manifest's
-/// config schema declares required fields, this fails explicitly naming them
-/// (rather than loading with an empty config and reporting an opaque init error).
-pub fn validate_check_sync(path: &Path, config_path: Option<&Path>) -> Result<()> {
+/// comes from `config_arg` — a JSON file path or an inline JSON object; when none
+/// is given and the manifest's config schema declares required fields, this fails
+/// explicitly naming them (rather than loading with an empty config and reporting
+/// an opaque init error).
+pub fn validate_check_sync(path: &Path, config_arg: Option<&str>) -> Result<()> {
     // Validate manifest + wasm, then read both for an in-memory package.
     let manifest = validate_extension(path)?;
     let manifest_toml = fs::read_to_string(path.join("manifest.toml"))?;
     let wasm_path = path.join(&manifest.component.entry);
     let wasm_bytes = fs::read(&wasm_path).with_context(|| format!("Failed to read WASM at {}", wasm_path.display()))?;
-    let config = resolve_config(&manifest, config_path)?;
+    let config = resolve_config(&manifest, config_arg)?;
 
     // Declared tools: id -> name, from the manifest [[tools]] tables.
     let declared: BTreeMap<String, String> = manifest
@@ -346,21 +347,28 @@ fn load_tool_list(
 
     let rt = tokio::runtime::Runtime::new().context("failed to start async runtime")?;
     rt.block_on(async {
-        let ext = emporium::Extension::from_bytes(&pkg, config)
-            .await
-            .context("failed to initialize the component (if it needs configuration, pass --config <file.json>)")?;
+        let ext = emporium::Extension::from_bytes(&pkg, config).await.context(
+            "failed to initialize the component (if it needs configuration, pass --config \
+                 <file.json or inline JSON>)",
+        )?;
         ext.list_tools().await.context("list_tools() failed")
     })
 }
 
-/// Resolve the config passed to the extension's `init`. With `--config`, parse
-/// that JSON file. Without it, an empty config is used only when the manifest's
-/// config schema requires nothing; if the schema lists `required` fields, fail
-/// explicitly and name them rather than load with an empty config.
-fn resolve_config(manifest: &Manifest, config_path: Option<&Path>) -> Result<serde_json::Value> {
-    if let Some(p) = config_path {
-        let raw = fs::read_to_string(p).with_context(|| format!("Failed to read config at {}", p.display()))?;
-        return serde_json::from_str(&raw).with_context(|| format!("config at {} must be valid JSON", p.display()));
+/// Resolve the config passed to the extension's `init`. `--config` accepts
+/// either an inline JSON object (a value whose first non-space char is `{`) or a
+/// path to a JSON file. Without it, an empty config is used only when the
+/// manifest's config schema requires nothing; if the schema lists `required`
+/// fields, fail explicitly and name them rather than load with an empty config.
+fn resolve_config(manifest: &Manifest, config_arg: Option<&str>) -> Result<serde_json::Value> {
+    if let Some(arg) = config_arg {
+        if arg.trim_start().starts_with('{') {
+            // Inline JSON object.
+            return serde_json::from_str(arg.trim()).context("inline --config must be valid JSON");
+        }
+        // Otherwise a path to a JSON file.
+        let raw = fs::read_to_string(arg).with_context(|| format!("Failed to read config file at {arg}"))?;
+        return serde_json::from_str(&raw).with_context(|| format!("config file {arg} must be valid JSON"));
     }
 
     let schema: serde_json::Value =
@@ -372,7 +380,7 @@ fn resolve_config(manifest: &Manifest, config_path: Option<&Path>) -> Result<ser
         .unwrap_or_default();
     if !required.is_empty() {
         bail!(
-            "extension '{}' requires configuration to initialize ({}); provide it with --config <file.json>",
+            "extension '{}' requires configuration to initialize ({}); provide it with --config <file.json or inline JSON>",
             manifest.extension.id,
             required.join(", ")
         );

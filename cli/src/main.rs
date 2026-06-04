@@ -59,10 +59,11 @@ enum EmporiumCommands {
         #[arg(long)]
         check_sync: bool,
 
-        /// JSON config file passed to the extension's init during --check-sync
-        /// (required when the manifest's config schema has required fields)
-        #[arg(long, value_name = "FILE")]
-        config: Option<PathBuf>,
+        /// Config passed to the extension's init during --check-sync: either a
+        /// path to a JSON file, or an inline JSON object (a value starting with
+        /// '{'). Required when the manifest's config schema has required fields.
+        #[arg(long, value_name = "FILE|JSON")]
+        config: Option<String>,
     },
 
     /// Check if the current version is available for publishing
