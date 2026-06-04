@@ -22,6 +22,7 @@
 //! ```
 
 pub mod block;
+pub mod data;
 pub mod discovery;
 pub mod error;
 pub mod extension;

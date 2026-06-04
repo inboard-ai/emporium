@@ -33,6 +33,13 @@ pub enum Error {
     #[error("Formula-provider error: {0}")]
     FormulaOperation(String),
 
+    /// The extension's data-provider returned a typed error from a call. Rides
+    /// the canonical [`data::Error`](emporium_core::data::Error) taxonomy so the
+    /// host can render per-case (reconnect, rate-limit, retry) instead of a
+    /// generic message.
+    #[error(transparent)]
+    Data(#[from] emporium_core::data::Error),
+
     /// The extension manifest was invalid.
     #[error("Manifest error: {0}")]
     ManifestError(ManifestError),

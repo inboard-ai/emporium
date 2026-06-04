@@ -7,10 +7,10 @@
 //! `tool-provider` and `host-events`, so the From/TryFrom impls are stamped
 //! out with declarative macros below — one invocation per bindings module.
 
-use emporium_core::{block, column, event, formula, plan, tool};
+use emporium_core::{block, column, data, event, formula, plan, tool};
 
 use crate::Error;
-use crate::wasm::{block_bindings, full_bindings, rich_bindings, tool_bindings};
+use crate::wasm::{block_bindings, data_bindings, full_bindings, rich_bindings, tool_bindings};
 
 // ---------------------------------------------------------------------------
 // Macro: tool-provider + host-events impls (all worlds)
@@ -272,6 +272,137 @@ impl From<column::Def> for full_types::ColumnDef {
             name: c.name,
             alias: c.alias,
             dtype: c.dtype,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// data-extension world: tool + host-events + data-provider
+// ---------------------------------------------------------------------------
+
+// data-extension world: tool + host-events (reuse the shared macro).
+// NOTE: like full-extension, `column-def` lives under `types` (not
+// `tool_provider`) because the `data-provider` export also references it, so
+// bindgen lifts it to the shared `types` interface module.
+use data_bindings::emporium::extensions::{host_events as data_evt, types as data_types};
+use data_bindings::exports::emporium::extensions::{data_provider as data_dp, tool_provider as data_tp};
+
+impl_tool_and_events!(data_tp, data_types, data_evt);
+
+// -- data-provider types: WIT -> canonical emporium_core::data --------------
+
+impl From<data_dp::RateLimit> for data::RateLimit {
+    fn from(r: data_dp::RateLimit) -> Self {
+        data::RateLimit {
+            message: r.message,
+            retry_after_secs: r.retry_after_secs,
+        }
+    }
+}
+
+impl From<data_dp::DataError> for data::Error {
+    fn from(e: data_dp::DataError) -> Self {
+        match e {
+            data_dp::DataError::AuthFailed(s) => data::Error::AuthFailed(s),
+            data_dp::DataError::NotFound(s) => data::Error::NotFound(s),
+            data_dp::DataError::InvalidSelection(s) => data::Error::InvalidSelection(s),
+            data_dp::DataError::RateLimited(r) => data::Error::RateLimited(r.into()),
+            data_dp::DataError::Transient(s) => data::Error::Transient(s),
+            data_dp::DataError::Unsupported(s) => data::Error::Unsupported(s),
+            data_dp::DataError::Internal(s) => data::Error::Internal(s),
+        }
+    }
+}
+
+impl TryFrom<data_dp::OutputSpec> for data::OutputSpec {
+    type Error = Error;
+    fn try_from(spec: data_dp::OutputSpec) -> Result<Self, Self::Error> {
+        Ok(match spec {
+            data_dp::OutputSpec::Rows(cols) => {
+                data::OutputSpec::Rows(cols.into_iter().map(column::Def::from).collect())
+            }
+            data_dp::OutputSpec::Scalar(col) => data::OutputSpec::Scalar(col.into()),
+            data_dp::OutputSpec::Finished => data::OutputSpec::Finished,
+        })
+    }
+}
+
+impl From<data_dp::FreeQuerySpec> for data::FreeQuerySpec {
+    fn from(s: data_dp::FreeQuerySpec) -> Self {
+        data::FreeQuerySpec {
+            language: s.language,
+            placeholder: s.placeholder,
+        }
+    }
+}
+
+impl TryFrom<data_dp::InputSpec> for data::InputSpec {
+    type Error = Error;
+    fn try_from(spec: data_dp::InputSpec) -> Result<Self, Self::Error> {
+        Ok(match spec {
+            data_dp::InputSpec::Params(s) => data::InputSpec::Params(serde_json::from_str(&s)?),
+            data_dp::InputSpec::Browse => data::InputSpec::Browse,
+            data_dp::InputSpec::ParamsAndBrowse(s) => data::InputSpec::ParamsAndBrowse(serde_json::from_str(&s)?),
+            data_dp::InputSpec::FreeQuery(q) => data::InputSpec::FreeQuery(q.into()),
+        })
+    }
+}
+
+impl TryFrom<data_dp::OutputContract> for data::OutputContract {
+    type Error = Error;
+    fn try_from(contract: data_dp::OutputContract) -> Result<Self, Self::Error> {
+        Ok(match contract {
+            data_dp::OutputContract::Known(spec) => data::OutputContract::Known(spec.try_into()?),
+            data_dp::OutputContract::Resolved => data::OutputContract::Resolved,
+        })
+    }
+}
+
+impl TryFrom<data_dp::DataSource> for data::Source {
+    type Error = Error;
+    fn try_from(src: data_dp::DataSource) -> Result<Self, Self::Error> {
+        Ok(data::Source {
+            id: src.id,
+            display_name: src.display_name,
+            description: src.description,
+            input: src.input.try_into()?,
+            output: src.output.try_into()?,
+        })
+    }
+}
+
+impl TryFrom<data_dp::Node> for data::Node {
+    type Error = Error;
+    fn try_from(node: data_dp::Node) -> Result<Self, Self::Error> {
+        Ok(data::Node {
+            id: node.id,
+            label: node.label,
+            branch: node.branch,
+            output: node.output.map(data::OutputSpec::try_from).transpose()?,
+        })
+    }
+}
+
+impl TryFrom<data_dp::Page> for data::Page {
+    type Error = Error;
+    fn try_from(page: data_dp::Page) -> Result<Self, Self::Error> {
+        Ok(data::Page {
+            nodes: page
+                .nodes
+                .into_iter()
+                .map(data::Node::try_from)
+                .collect::<Result<Vec<_>, _>>()?,
+            next_cursor: page.next_cursor,
+        })
+    }
+}
+
+impl From<data_dp::FetchResult> for data::FetchResult {
+    fn from(r: data_dp::FetchResult) -> Self {
+        data::FetchResult {
+            arrow_ipc: r.arrow_ipc,
+            resource_id: r.resource_id,
+            next_cursor: r.next_cursor,
         }
     }
 }

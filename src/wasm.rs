@@ -8,7 +8,7 @@
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
-use emporium_core::{block, event, formula, plan, tool};
+use emporium_core::{block, data, event, formula, plan, tool};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
@@ -35,6 +35,9 @@ pub(crate) const RICH_WORLD: &str = "rich-extension";
 
 /// World name for the full-extension capability tier (rich + host-data).
 pub(crate) const FULL_WORLD: &str = "full-extension";
+
+/// World name for the data-extension capability tier (tool + data-provider).
+pub(crate) const DATA_WORLD: &str = "data-extension";
 
 /// Broadcast capacity for the host-events channel, per MAP_PLAN.
 const EVENT_CAPACITY: usize = 256;
@@ -118,6 +121,26 @@ pub(crate) mod full_bindings {
 use full_bindings::FullExtension;
 use full_bindings::emporium::extensions::{host_data as wit_host_data, host_events as wit_host_events_full};
 
+/// wasmtime bindings for the `data-extension` world.
+///
+/// Bindgen produces `DataExtension`, `DataExtensionPre`, the host-events
+/// `Host` trait, and the `exports::emporium::extensions::*` type records —
+/// including the data-provider types that the other worlds do not contain.
+/// Like the other modules, all shared types are regenerated as DISTINCT Rust
+/// types from their counterparts.
+#[allow(clippy::all)]
+pub(crate) mod data_bindings {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "data-extension",
+        imports: { default: async },
+        exports: { default: async },
+    });
+}
+
+use data_bindings::DataExtension;
+use data_bindings::emporium::extensions::host_events as wit_host_events_data;
+
 /// Handle returned from [`spawn_worker`]: gives the caller the means to send
 /// requests and subscribe to events. The worker thread keeps running as long
 /// as any clone of `requests` survives.
@@ -138,6 +161,10 @@ pub(crate) struct Worker {
     /// True when the extension was loaded against a world that imports
     /// `host-data` (currently only `full-extension`).
     pub(crate) has_host_data: bool,
+    /// True when the extension was loaded against a world that exports
+    /// `data-provider`. Gates the host's `data` accessor (landed in a later
+    /// commit of this arc).
+    pub(crate) has_data: bool,
 }
 
 /// Metadata captured from `extension::get-metadata` at init, in a
@@ -189,6 +216,17 @@ impl From<rich_bindings::exports::emporium::extensions::extension::Metadata> for
 
 impl From<full_bindings::exports::emporium::extensions::extension::Metadata> for WorkerMetadata {
     fn from(m: full_bindings::exports::emporium::extensions::extension::Metadata) -> Self {
+        WorkerMetadata {
+            id: m.id,
+            name: m.name,
+            version: m.version,
+            description: m.description,
+        }
+    }
+}
+
+impl From<data_bindings::exports::emporium::extensions::extension::Metadata> for WorkerMetadata {
+    fn from(m: data_bindings::exports::emporium::extensions::extension::Metadata) -> Self {
         WorkerMetadata {
             id: m.id,
             name: m.name,
@@ -283,6 +321,47 @@ pub(crate) enum Request {
         /// JSON-encoded result (whatever shape the formula returns).
         reply: oneshot::Sender<Result<String, Error>>,
     },
+    /// Enumerate the runtime catalog of data sources.
+    ListSources {
+        /// Channel used to deliver the reply.
+        reply: oneshot::Sender<Result<Vec<data::Source>, Error>>,
+    },
+    /// Ask whether the catalog is dynamic (vs. the manifest mirror).
+    IsCatalogDynamic {
+        /// Channel used to deliver the reply.
+        reply: oneshot::Sender<Result<bool, Error>>,
+    },
+    /// Drill one level into a source's browse tree (paginated).
+    Browse {
+        /// Source identifier.
+        source: String,
+        /// JSON array of node ids from root.
+        path: String,
+        /// Opaque continuation from a prior page, if any.
+        cursor: Option<String>,
+        /// Maximum nodes to return in this page.
+        limit: u32,
+        /// Channel used to deliver the reply.
+        reply: oneshot::Sender<Result<data::Page, Error>>,
+    },
+    /// Resolve a source's output schema for a given selection.
+    OutputSchema {
+        /// Source identifier.
+        source: String,
+        /// JSON-encoded `Selection`.
+        selection: String,
+        /// Channel used to deliver the reply.
+        reply: oneshot::Sender<Result<data::OutputSpec, Error>>,
+    },
+    /// Fetch result data for a selection against a source.
+    Fetch {
+        /// Source identifier.
+        source: String,
+        /// JSON-encoded `Selection`.
+        selection: String,
+        /// Channel used to deliver the reply.
+        reply: oneshot::Sender<Result<data::FetchResult, Error>>,
+    },
 }
 
 /// Per-store state for wasmtime: WASI context, HTTP context, a resource
@@ -347,6 +426,14 @@ impl wit_host_events_full::Host for State {
     }
 }
 
+impl wit_host_events_data::Host for State {
+    async fn notify(&mut self, event: wit_host_events_data::Event) {
+        let core_event: event::Event = event.into();
+        tracing::info!(?core_event, "host-events: received notify from extension");
+        let _ = self.events.send(core_event);
+    }
+}
+
 // The `types` interface has no methods — its Host trait is empty but must
 // still be implemented on State for every bindings module that references
 // `column-def` (tool-provider in every world, host-data in full-extension).
@@ -354,6 +441,7 @@ impl tool_bindings::emporium::extensions::types::Host for State {}
 impl block_bindings::emporium::extensions::types::Host for State {}
 impl rich_bindings::emporium::extensions::types::Host for State {}
 impl full_bindings::emporium::extensions::types::Host for State {}
+impl data_bindings::emporium::extensions::types::Host for State {}
 
 // host-data Host + HostCursor impls (full-extension world only).
 //
@@ -471,6 +559,7 @@ pub(crate) async fn spawn_worker(
         BLOCK_WORLD => WorkerRoute::Block,
         RICH_WORLD => WorkerRoute::Rich,
         FULL_WORLD => WorkerRoute::Full,
+        DATA_WORLD => WorkerRoute::Data,
         other => return Err(Error::UnsupportedWorld(other.to_string())),
     };
 
@@ -523,6 +612,14 @@ pub(crate) async fn spawn_worker(
                         meta_tx,
                         req_rx,
                     )),
+                    WorkerRoute::Data => runtime.block_on(run_data_worker(
+                        wasm_bytes,
+                        config,
+                        event_tx_thread,
+                        data,
+                        meta_tx,
+                        req_rx,
+                    )),
                 }
             }));
             if let Err(payload) = outcome {
@@ -544,6 +641,7 @@ pub(crate) async fn spawn_worker(
         has_block: matches!(route, WorkerRoute::Block | WorkerRoute::Rich | WorkerRoute::Full),
         has_formula: matches!(route, WorkerRoute::Rich | WorkerRoute::Full),
         has_host_data: matches!(route, WorkerRoute::Full),
+        has_data: matches!(route, WorkerRoute::Data),
     })
 }
 
@@ -558,6 +656,9 @@ enum WorkerRoute {
     Rich,
     /// `full-extension` world — adds the host-data import on top of rich.
     Full,
+    /// `data-extension` world — tool-provider + data-provider (a second
+    /// branch off tool-extension, orthogonal to the block/formula chain).
+    Data,
 }
 
 /// Internal payload delivered through the meta oneshot on successful init.
@@ -713,6 +814,42 @@ async fn run_full_worker(
     }
 }
 
+/// The async body that runs the `data-extension` world worker.
+async fn run_data_worker(
+    wasm_bytes: Vec<u8>,
+    config: String,
+    event_tx: broadcast::Sender<event::Event>,
+    data: crate::host_data::DataRegistry,
+    meta_tx: oneshot::Sender<Result<WorkerBootstrap, Error>>,
+    mut req_rx: mpsc::UnboundedReceiver<Request>,
+) {
+    let init = match initialize_data(wasm_bytes, config, event_tx, data).await {
+        Ok(ok) => ok,
+        Err(err) => {
+            let _ = meta_tx.send(Err(err));
+            return;
+        }
+    };
+    let InitializedData {
+        bindings,
+        mut store,
+        metadata,
+    } = init;
+
+    if meta_tx
+        .send(Ok(WorkerBootstrap {
+            metadata: metadata.into(),
+        }))
+        .is_err()
+    {
+        return;
+    }
+
+    while let Some(request) = req_rx.recv().await {
+        handle_data_request(request, &bindings, &mut store).await;
+    }
+}
+
 /// Output of the tool-extension initialization phase.
 struct InitializedTool {
     bindings: ToolExtension,
@@ -739,6 +876,13 @@ struct InitializedFull {
     bindings: FullExtension,
     store: Store<State>,
     metadata: full_bindings::exports::emporium::extensions::extension::Metadata,
+}
+
+/// Output of the data-extension initialization phase.
+struct InitializedData {
+    bindings: DataExtension,
+    store: Store<State>,
+    metadata: data_bindings::exports::emporium::extensions::extension::Metadata,
 }
 
 /// Compile, instantiate, `init`, and capture metadata for tool-extension.
@@ -854,6 +998,34 @@ async fn initialize_full(
     })
 }
 
+/// Compile, instantiate, `init`, and capture metadata for data-extension.
+async fn initialize_data(
+    wasm_bytes: Vec<u8>,
+    config: String,
+    event_tx: broadcast::Sender<event::Event>,
+    data: crate::host_data::DataRegistry,
+) -> Result<InitializedData, Error> {
+    let (engine, component, mut store) = prepare_component(&wasm_bytes, event_tx, data)?;
+
+    validate_world_exports(DATA_WORLD, &engine, &component)?;
+
+    let linker = build_data_linker(&engine)?;
+    let bindings = DataExtension::instantiate_async(&mut store, &component, &linker).await?;
+
+    let ext_guest = bindings.emporium_extensions_extension();
+    let metadata = ext_guest.call_get_metadata(&mut store).await?;
+    let init_result = ext_guest.call_init(&mut store, &config).await?;
+    if let Err(msg) = init_result {
+        return Err(Error::ExtensionLoadError(msg));
+    }
+
+    Ok(InitializedData {
+        bindings,
+        store,
+        metadata,
+    })
+}
+
 /// Compile the component and build the wasmtime store with shared WASI/HTTP
 /// + host-events context. Used by both world-specific initialization paths.
 fn prepare_component(
@@ -907,6 +1079,15 @@ fn build_full_linker(engine: &Engine) -> Result<Linker<State>, Error> {
     Ok(linker)
 }
 
+/// Register WASI, WASI-HTTP, and the host-events interface for data-extension.
+/// data-extension does NOT import host-data, so this mirrors the tool/block/rich
+/// linkers rather than the full one.
+fn build_data_linker(engine: &Engine) -> Result<Linker<State>, Error> {
+    let mut linker = build_base_linker(engine)?;
+    DataExtension::add_to_linker::<State, HostEventsData>(&mut linker, |s| s)?;
+    Ok(linker)
+}
+
 /// Base linker shared by all worlds: WASI + WASI-HTTP. Each world-specific
 /// linker is built on top.
 fn build_base_linker(engine: &Engine) -> Result<Linker<State>, Error> {
@@ -931,6 +1112,7 @@ fn validate_world_exports(declared: &str, engine: &Engine, component: &Component
         BLOCK_WORLD => &["extension", "tool-provider", "block-provider"],
         RICH_WORLD => &["extension", "tool-provider", "block-provider", "formula-provider"],
         FULL_WORLD => &["extension", "tool-provider", "block-provider", "formula-provider"],
+        DATA_WORLD => &["extension", "tool-provider", "data-provider"],
         other => return Err(Error::UnsupportedWorld(other.to_string())),
     };
 
@@ -1008,6 +1190,21 @@ async fn handle_tool_request(request: Request, bindings: &ToolExtension, store: 
         Request::FormulaEvaluate { reply, .. } => {
             let _ = reply.send(Err(Error::UnsupportedWorld(DEFAULT_WORLD.to_string())));
         }
+        Request::ListSources { reply } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(DEFAULT_WORLD.to_string())));
+        }
+        Request::IsCatalogDynamic { reply } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(DEFAULT_WORLD.to_string())));
+        }
+        Request::Browse { reply, .. } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(DEFAULT_WORLD.to_string())));
+        }
+        Request::OutputSchema { reply, .. } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(DEFAULT_WORLD.to_string())));
+        }
+        Request::Fetch { reply, .. } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(DEFAULT_WORLD.to_string())));
+        }
     }
 }
 
@@ -1059,6 +1256,21 @@ async fn handle_block_request(request: Request, bindings: &BlockExtension, store
         Request::FormulaEvaluate { reply, .. } => {
             let _ = reply.send(Err(Error::UnsupportedWorld(BLOCK_WORLD.to_string())));
         }
+        Request::ListSources { reply } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(BLOCK_WORLD.to_string())));
+        }
+        Request::IsCatalogDynamic { reply } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(BLOCK_WORLD.to_string())));
+        }
+        Request::Browse { reply, .. } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(BLOCK_WORLD.to_string())));
+        }
+        Request::OutputSchema { reply, .. } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(BLOCK_WORLD.to_string())));
+        }
+        Request::Fetch { reply, .. } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(BLOCK_WORLD.to_string())));
+        }
     }
 }
 
@@ -1107,6 +1319,21 @@ async fn handle_rich_request(request: Request, bindings: &RichExtension, store: 
         Request::FormulaEvaluate { name, args, reply } => {
             let outcome = rich_formula_evaluate(bindings, store, &name, &args).await;
             let _ = reply.send(outcome);
+        }
+        Request::ListSources { reply } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(RICH_WORLD.to_string())));
+        }
+        Request::IsCatalogDynamic { reply } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(RICH_WORLD.to_string())));
+        }
+        Request::Browse { reply, .. } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(RICH_WORLD.to_string())));
+        }
+        Request::OutputSchema { reply, .. } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(RICH_WORLD.to_string())));
+        }
+        Request::Fetch { reply, .. } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(RICH_WORLD.to_string())));
         }
     }
 }
@@ -1343,6 +1570,21 @@ async fn handle_full_request(request: Request, bindings: &FullExtension, store: 
             let outcome = full_formula_evaluate(bindings, store, &name, &args).await;
             let _ = reply.send(outcome);
         }
+        Request::ListSources { reply } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(FULL_WORLD.to_string())));
+        }
+        Request::IsCatalogDynamic { reply } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(FULL_WORLD.to_string())));
+        }
+        Request::Browse { reply, .. } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(FULL_WORLD.to_string())));
+        }
+        Request::OutputSchema { reply, .. } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(FULL_WORLD.to_string())));
+        }
+        Request::Fetch { reply, .. } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(FULL_WORLD.to_string())));
+        }
     }
 }
 
@@ -1433,6 +1675,161 @@ async fn full_formula_evaluate(
     let guest = bindings.emporium_extensions_formula_provider();
     let wit_outcome = guest.call_evaluate(&mut *store, name, args).await?;
     wit_outcome.map_err(Error::FormulaOperation)
+}
+
+/// Dispatch a single typed [`Request`] against the data-extension bindings.
+/// Handles the tool-provider variants (Tool*, View) by reusing the
+/// tool-provider guest, plus the five data-provider variants. The Block* and
+/// Formula* variants are not covered by this world and surface
+/// [`Error::UnsupportedWorld`].
+async fn handle_data_request(request: Request, bindings: &DataExtension, store: &mut Store<State>) {
+    match request {
+        Request::ListTools { reply } => {
+            let outcome = data_list_tools(bindings, store).await;
+            let _ = reply.send(outcome);
+        }
+        Request::ExecuteTool { name, params, reply } => {
+            let outcome = data_execute_tool(bindings, store, &name, &params).await;
+            let _ = reply.send(outcome);
+        }
+        Request::View { reply } => {
+            let outcome = data_view(bindings, store).await;
+            let _ = reply.send(outcome);
+        }
+        Request::BlockTypes { reply } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(DATA_WORLD.to_string())));
+        }
+        Request::BlockCreate { reply, .. } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(DATA_WORLD.to_string())));
+        }
+        Request::BlockPlan { reply, .. } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(DATA_WORLD.to_string())));
+        }
+        Request::BlockValidate { reply, .. } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(DATA_WORLD.to_string())));
+        }
+        Request::FormulaDefs { reply } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(DATA_WORLD.to_string())));
+        }
+        Request::FormulaEvaluate { reply, .. } => {
+            let _ = reply.send(Err(Error::UnsupportedWorld(DATA_WORLD.to_string())));
+        }
+        Request::ListSources { reply } => {
+            let outcome = data_list_sources(bindings, store).await;
+            let _ = reply.send(outcome);
+        }
+        Request::IsCatalogDynamic { reply } => {
+            let outcome = data_is_catalog_dynamic(bindings, store).await;
+            let _ = reply.send(outcome);
+        }
+        Request::Browse {
+            source,
+            path,
+            cursor,
+            limit,
+            reply,
+        } => {
+            let outcome = data_browse(bindings, store, &source, &path, cursor.as_deref(), limit).await;
+            let _ = reply.send(outcome);
+        }
+        Request::OutputSchema {
+            source,
+            selection,
+            reply,
+        } => {
+            let outcome = data_output_schema(bindings, store, &source, &selection).await;
+            let _ = reply.send(outcome);
+        }
+        Request::Fetch {
+            source,
+            selection,
+            reply,
+        } => {
+            let outcome = data_fetch(bindings, store, &source, &selection).await;
+            let _ = reply.send(outcome);
+        }
+    }
+}
+
+async fn data_list_tools(bindings: &DataExtension, store: &mut Store<State>) -> Result<Vec<tool::Info>, Error> {
+    let guest = bindings.emporium_extensions_tool_provider();
+    let wit_tools = guest.call_list_tools(&mut *store).await?;
+    wit_tools
+        .into_iter()
+        .map(tool::Info::try_from)
+        .collect::<Result<Vec<_>, _>>()
+}
+
+async fn data_execute_tool(
+    bindings: &DataExtension,
+    store: &mut Store<State>,
+    name: &str,
+    params: &str,
+) -> Result<tool::Output, Error> {
+    let guest = bindings.emporium_extensions_tool_provider();
+    let wit_outcome = guest.call_execute_tool(&mut *store, name, params).await?;
+    let wit_output = wit_outcome.map_err(Error::ExtensionError)?;
+    tool::Output::try_from(wit_output)
+}
+
+async fn data_view(bindings: &DataExtension, store: &mut Store<State>) -> Result<String, Error> {
+    let guest = bindings.emporium_extensions_extension();
+    let s = guest.call_view(&mut *store).await?;
+    Ok(s)
+}
+
+async fn data_list_sources(bindings: &DataExtension, store: &mut Store<State>) -> Result<Vec<data::Source>, Error> {
+    let guest = bindings.emporium_extensions_data_provider();
+    let wit_outcome = guest.call_list_sources(&mut *store).await?;
+    let wit_sources = wit_outcome.map_err(|e| Error::Data(data::Error::from(e)))?;
+    wit_sources
+        .into_iter()
+        .map(data::Source::try_from)
+        .collect::<Result<Vec<_>, _>>()
+}
+
+async fn data_is_catalog_dynamic(bindings: &DataExtension, store: &mut Store<State>) -> Result<bool, Error> {
+    let guest = bindings.emporium_extensions_data_provider();
+    let dynamic = guest.call_is_catalog_dynamic(&mut *store).await?;
+    Ok(dynamic)
+}
+
+async fn data_browse(
+    bindings: &DataExtension,
+    store: &mut Store<State>,
+    source: &str,
+    path: &str,
+    cursor: Option<&str>,
+    limit: u32,
+) -> Result<data::Page, Error> {
+    let guest = bindings.emporium_extensions_data_provider();
+    let wit_outcome = guest.call_browse(&mut *store, source, path, cursor, limit).await?;
+    let wit_page = wit_outcome.map_err(|e| Error::Data(data::Error::from(e)))?;
+    data::Page::try_from(wit_page)
+}
+
+async fn data_output_schema(
+    bindings: &DataExtension,
+    store: &mut Store<State>,
+    source: &str,
+    selection: &str,
+) -> Result<data::OutputSpec, Error> {
+    let guest = bindings.emporium_extensions_data_provider();
+    let wit_outcome = guest.call_output_schema(&mut *store, source, selection).await?;
+    let wit_spec = wit_outcome.map_err(|e| Error::Data(data::Error::from(e)))?;
+    data::OutputSpec::try_from(wit_spec)
+}
+
+async fn data_fetch(
+    bindings: &DataExtension,
+    store: &mut Store<State>,
+    source: &str,
+    selection: &str,
+) -> Result<data::FetchResult, Error> {
+    let guest = bindings.emporium_extensions_data_provider();
+    let wit_outcome = guest.call_fetch(&mut *store, source, selection).await?;
+    let wit_result = wit_outcome.map_err(|e| Error::Data(data::Error::from(e)))?;
+    Ok(data::FetchResult::from(wit_result))
 }
 
 // Conversions from wasmtime-bindgen types to canonical core types live in

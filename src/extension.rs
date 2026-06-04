@@ -17,7 +17,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use crate::host_data::DataRegistry;
 use crate::manifest::{Manifest, RawManifest};
 use crate::wasm::{self, Request};
-use crate::{Error, ManifestTool, block, formula};
+use crate::{Error, ManifestTool, block, data, formula};
 
 /// A loaded extension, ready to receive typed calls.
 ///
@@ -40,6 +40,9 @@ pub struct Extension {
     /// True when the extension was loaded against a world that imports
     /// `host-data` (currently only `full-extension`).
     has_host_data: bool,
+    /// True when the extension exports the `data-provider` interface (loaded
+    /// against the `data-extension` world). Gates [`Extension::data`](Self::data).
+    has_data: bool,
 }
 
 /// Metadata captured from `extension::get-metadata` during init, kept on the
@@ -108,6 +111,7 @@ impl Extension {
             has_block: worker.has_block,
             has_formula: worker.has_formula,
             has_host_data: worker.has_host_data,
+            has_data: worker.has_data,
         })
     }
 
@@ -201,6 +205,15 @@ impl Extension {
         self.has_formula.then(|| formula::Provider::new(self.requests.clone()))
     }
 
+    /// Return a [`data::Provider`] when the extension was loaded against the
+    /// `data-extension` world (which exports `data-provider`). Returns `None`
+    /// otherwise. This is the declarative, UI-builder-facing sibling to the tool
+    /// API (see [`data::Provider`]); each call yields a fresh provider sharing
+    /// the same underlying worker channel — cheap to clone.
+    pub fn data(&self) -> Option<data::Provider> {
+        self.has_data.then(|| data::Provider::new(self.requests.clone()))
+    }
+
     /// True when the extension was loaded against `full-extension` and can
     /// open host-data cursors via its import of the `host-data` interface.
     pub fn has_host_data(&self) -> bool {
@@ -224,6 +237,7 @@ impl std::fmt::Debug for Extension {
             .field("has_block", &self.has_block)
             .field("has_formula", &self.has_formula)
             .field("has_host_data", &self.has_host_data)
+            .field("has_data", &self.has_data)
             .finish()
     }
 }
