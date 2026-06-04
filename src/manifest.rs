@@ -1,6 +1,6 @@
 //! Extension manifest types.
 
-use emporium_types::ManifestTool;
+use emporium_types::{ManifestColumn, ManifestDataSource, ManifestTool};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -35,6 +35,11 @@ pub struct Manifest {
     pub capabilities: HashMap<String, bool>,
     #[serde(default)]
     pub tools: Vec<ManifestTool>,
+    /// Static data-source catalog mirror for the data-capability picker. Empty
+    /// for tool-only extensions; populated for `data-extension`s with a static
+    /// catalog (see [`ManifestDataSource`]).
+    #[serde(default)]
+    pub data_sources: Vec<ManifestDataSource>,
     /// JSON Schema for extension configuration/settings
     pub config_schema: serde_json::Value,
     /// Declared world the extension was built against, e.g. `"tool-extension"`.
@@ -77,6 +82,28 @@ pub(crate) struct RawActivity {
     pub subject_field: String,
 }
 
+/// Raw data-source entry from `[[data_sources]]` TOML array-of-tables.
+#[derive(Debug, Deserialize)]
+pub(crate) struct RawDataSource {
+    pub id: String,
+    pub display_name: String,
+    pub description: String,
+    pub input: String,
+    #[serde(default)]
+    pub params_schema: Option<String>,
+    pub output: String,
+    #[serde(default)]
+    pub columns: Vec<RawColumn>,
+}
+
+/// Raw output column from `[[data_sources.columns]]` sub-tables.
+#[derive(Debug, Deserialize)]
+pub(crate) struct RawColumn {
+    pub name: String,
+    pub alias: String,
+    pub dtype: String,
+}
+
 /// Raw manifest as stored in manifest.toml
 #[derive(Debug, Deserialize)]
 pub(crate) struct RawManifest {
@@ -85,6 +112,8 @@ pub(crate) struct RawManifest {
     pub config: ConfigSection,
     #[serde(default)]
     pub tools: Option<Vec<RawTool>>,
+    #[serde(default)]
+    pub data_sources: Option<Vec<RawDataSource>>,
     #[serde(default)]
     pub capabilities: Option<HashMap<String, toml::Value>>,
 }
@@ -183,6 +212,37 @@ impl RawManifest {
             Vec::new()
         };
 
+        let data_sources = self
+            .data_sources
+            .unwrap_or_default()
+            .into_iter()
+            .map(|d| {
+                let params_schema = match d.params_schema {
+                    Some(ref s) => Some(serde_json::from_str(s).map_err(|e| {
+                        crate::Error::Custom(format!("Invalid params_schema JSON for data source '{}': {}", d.id, e))
+                    })?),
+                    None => None,
+                };
+                Ok(ManifestDataSource {
+                    id: d.id,
+                    display_name: d.display_name,
+                    description: d.description,
+                    input: d.input,
+                    params_schema,
+                    output: d.output,
+                    columns: d
+                        .columns
+                        .into_iter()
+                        .map(|c| ManifestColumn {
+                            name: c.name,
+                            alias: c.alias,
+                            dtype: c.dtype,
+                        })
+                        .collect(),
+                })
+            })
+            .collect::<Result<Vec<_>, crate::Error>>()?;
+
         // Convert capabilities to HashMap<String, bool>
         let capabilities = self
             .capabilities
@@ -210,6 +270,7 @@ impl RawManifest {
             features: self.extension.features,
             capabilities,
             tools,
+            data_sources,
             config_schema,
             world: self.component.world,
         })
@@ -340,6 +401,92 @@ description = "Store a value"
     fn manifest_tools_list_empty_by_default() {
         let manifest = parse_manifest(BASE).expect("parse minimal manifest");
         assert!(manifest.tools.is_empty());
+    }
+
+    #[test]
+    fn manifest_data_sources_empty_by_default() {
+        let manifest = parse_manifest(BASE).expect("parse minimal manifest");
+        assert!(manifest.data_sources.is_empty());
+    }
+
+    #[test]
+    fn manifest_data_sources_parsed_with_columns_and_schema() {
+        let toml_str = r#"
+[extension]
+id = "weather"
+name = "Weather"
+version = "0.1.0"
+author = "Test"
+license = "MIT"
+
+[component]
+entry = "x.wasm"
+world = "data-extension"
+
+[config]
+schema = '{}'
+
+[[data_sources]]
+id = "daily-forecast"
+display_name = "Daily Forecast"
+description = "Daily weather forecast"
+input = "params"
+params_schema = '{"type":"object","properties":{"latitude":{"type":"number"}},"required":["latitude"]}'
+output = "known"
+[[data_sources.columns]]
+name = "time"
+alias = "Date"
+dtype = "date"
+[[data_sources.columns]]
+name = "temperature_2m_max"
+alias = "Max Temp"
+dtype = "number"
+"#;
+        let manifest = parse_manifest(toml_str).expect("parse data_sources manifest");
+        assert_eq!(manifest.data_sources.len(), 1);
+        let ds = &manifest.data_sources[0];
+        assert_eq!(ds.id, "daily-forecast");
+        assert_eq!(ds.display_name, "Daily Forecast");
+        assert_eq!(ds.input, "params");
+        assert_eq!(ds.output, "known");
+        assert_eq!(ds.columns.len(), 2);
+        assert_eq!(ds.columns[0].name, "time");
+        assert_eq!(ds.columns[0].dtype, "date");
+        assert_eq!(
+            ds.params_schema.as_ref().expect("params_schema")["properties"]["latitude"]["type"],
+            "number"
+        );
+    }
+
+    #[test]
+    fn manifest_data_sources_invalid_params_schema_errors() {
+        let toml_str = r#"
+[extension]
+id = "weather"
+name = "Weather"
+version = "0.1.0"
+author = "Test"
+license = "MIT"
+
+[component]
+entry = "x.wasm"
+
+[config]
+schema = '{}'
+
+[[data_sources]]
+id = "bad"
+display_name = "Bad"
+description = "d"
+input = "params"
+params_schema = "not valid json{"
+output = "resolved"
+"#;
+        let err = parse_manifest(toml_str).expect_err("invalid params_schema must fail");
+        assert!(
+            matches!(err, Error::Custom(ref m) if m.contains("Invalid params_schema JSON")),
+            "expected params_schema error, got: {err:?}"
+        );
     }
 
     #[test]

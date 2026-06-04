@@ -230,6 +230,7 @@ mod tests {
             features: vec![],
             capabilities: Default::default(),
             tools,
+            data_sources: vec![],
             config_schema: json!({}),
             world: None,
         }
