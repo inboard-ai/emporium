@@ -13,16 +13,22 @@
 //! hatch for authors who build the bytes another way.
 //!
 //! ```no_run
-//! use emporium_sdk::Frame;
+//! use emporium_sdk::{Alias, Frame, Name};
 //! let frame = Frame::builder()
-//!     .text("symbol", "Symbol", ["AAPL".to_string(), "MSFT".to_string()])
-//!     .number("close", "Close", [195.0_f64, 410.5]) // native f64 — bit-exact, no JSON
+//!     .text(Name::new("symbol"), Alias::new("Symbol"), ["AAPL".to_string(), "MSFT".to_string()])
+//!     .number(Name::new("close"), Alias::new("Close"), [195.0_f64, 410.5]) // native f64 — bit-exact, no JSON
 //!     .build()
 //!     .expect("rectangular columns");
 //! let (schema, arrow_ipc) = frame.into_parts();
 //! // Drop `arrow_ipc` into your generated `DataFrameOutput.arrow_ipc`, and map
 //! // `schema` into its `schema: Vec<ColumnDef>` (a 3-field copy).
 //! ```
+//!
+//! A column's source [`Name`] and display [`Alias`] are **distinct newtypes**,
+//! so a positional swap — `.text(alias, name, …)` — is a compile error, not a
+//! silent label/lookup mismatch the host only notices at decode time. (The host
+//! crate's `column::Def` mirrors the same split; the SDK keeps its own copies to
+//! stay free of the polars-bearing `emporium-core`.)
 
 use std::sync::Arc;
 
@@ -34,20 +40,66 @@ use arrow_ipc::reader::FileReader;
 use arrow_ipc::writer::FileWriter;
 use arrow_schema::{DataType, Field, Schema};
 
-/// A column's schema descriptor: `name` (canonical id), `alias` (display name,
-/// also the Arrow field name), and a `dtype` tag matching the host's
-/// `source::Kind` vocabulary (`string | number | integer | boolean | date`).
+/// A column's original source name — the canonical id from the data source,
+/// distinct by type from [`Alias`] so a caller can't pass one where the other is
+/// expected (the swap is a compile error). Mirrors the host's `column::Name`;
+/// the SDK keeps its own copy to stay free of the polars-bearing `emporium-core`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Name(String);
+
+/// A column's display alias — the human-facing label, used verbatim as the Arrow
+/// field name in the IPC buffer. Distinct by type from [`Name`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Alias(String);
+
+macro_rules! string_newtype {
+    ($ty:ident) => {
+        impl $ty {
+            /// Wrap a string as this column identity.
+            pub fn new(value: impl Into<String>) -> Self {
+                Self(value.into())
+            }
+
+            /// Borrow as a string slice.
+            #[must_use]
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+
+            /// Consume into the owned string.
+            #[must_use]
+            pub fn into_string(self) -> String {
+                self.0
+            }
+        }
+
+        impl std::fmt::Display for $ty {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+    };
+}
+
+string_newtype!(Name);
+string_newtype!(Alias);
+
+/// A column's schema descriptor: [`name`](Self::name) (canonical id),
+/// [`alias`](Self::alias) (display name, also the Arrow field name), and a
+/// `dtype` tag matching the host's `source::Kind` vocabulary
+/// (`string | number | integer | boolean | date`).
 ///
-/// Deliberately a plain struct, not the host's `column::Def` (which lives in the
-/// polars-bearing `emporium-core`): the SDK stays guest-lean, and authors map
-/// these three fields into whatever `ColumnDef` their `wit_bindgen::generate!`
-/// produced.
+/// `name` and `alias` are distinct newtypes precisely so they can't be swapped
+/// at a builder call site. Deliberately a plain struct, not the host's
+/// `column::Def` (which lives in the polars-bearing `emporium-core`): the SDK
+/// stays guest-lean, and authors map these three fields into whatever
+/// `ColumnDef` their `wit_bindgen::generate!` produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnDef {
-    /// Canonical column id.
-    pub name: String,
+    /// Canonical column id — the source name.
+    pub name: Name,
     /// Display name; used verbatim as the Arrow field name in the IPC buffer.
-    pub alias: String,
+    pub alias: Alias,
     /// Host dtype tag: `string | number | integer | boolean | date`.
     pub dtype: String,
 }
@@ -127,12 +179,7 @@ pub struct FrameBuilder {
 
 impl FrameBuilder {
     /// Append a text column (Arrow `Utf8`, dtype `"string"`).
-    pub fn text(
-        self,
-        name: impl Into<String>,
-        alias: impl Into<String>,
-        values: impl IntoIterator<Item = impl Into<Option<String>>>,
-    ) -> Self {
+    pub fn text(self, name: Name, alias: Alias, values: impl IntoIterator<Item = impl Into<Option<String>>>) -> Self {
         let array: StringArray = values.into_iter().map(Into::into).collect();
         self.push(name, alias, "string", DataType::Utf8, Arc::new(array))
     }
@@ -141,12 +188,7 @@ impl FrameBuilder {
     /// `Utf8` fallback for ambiguous or fiscal periods ("2024 Q1", "FY2024")
     /// that are not lossless calendar dates. For real calendar dates prefer
     /// [`Self::date32`] (or the dynamic [`data_frame_ipc`], which auto-detects).
-    pub fn date(
-        self,
-        name: impl Into<String>,
-        alias: impl Into<String>,
-        values: impl IntoIterator<Item = impl Into<Option<String>>>,
-    ) -> Self {
+    pub fn date(self, name: Name, alias: Alias, values: impl IntoIterator<Item = impl Into<Option<String>>>) -> Self {
         let array: StringArray = values.into_iter().map(Into::into).collect();
         self.push(name, alias, "date", DataType::Utf8, Arc::new(array))
     }
@@ -157,62 +199,36 @@ impl FrameBuilder {
     /// as a real temporal column (a cube time-dimension, no host sniffing) and
     /// is smaller than the string form. For ISO strings, [`iso_date_to_days`]
     /// converts; for ambiguous periods keep [`Self::date`].
-    pub fn date32(
-        self,
-        name: impl Into<String>,
-        alias: impl Into<String>,
-        values: impl IntoIterator<Item = impl Into<Option<i32>>>,
-    ) -> Self {
+    pub fn date32(self, name: Name, alias: Alias, values: impl IntoIterator<Item = impl Into<Option<i32>>>) -> Self {
         let array: Date32Array = values.into_iter().map(Into::into).collect();
         self.push(name, alias, "date", DataType::Date32, Arc::new(array))
     }
 
     /// Append a floating-point column (Arrow `Float64`, dtype `"number"`).
-    pub fn number(
-        self,
-        name: impl Into<String>,
-        alias: impl Into<String>,
-        values: impl IntoIterator<Item = impl Into<Option<f64>>>,
-    ) -> Self {
+    pub fn number(self, name: Name, alias: Alias, values: impl IntoIterator<Item = impl Into<Option<f64>>>) -> Self {
         let array: Float64Array = values.into_iter().map(Into::into).collect();
         self.push(name, alias, "number", DataType::Float64, Arc::new(array))
     }
 
     /// Append an integer column (Arrow `Int64`, dtype `"integer"`).
-    pub fn integer(
-        self,
-        name: impl Into<String>,
-        alias: impl Into<String>,
-        values: impl IntoIterator<Item = impl Into<Option<i64>>>,
-    ) -> Self {
+    pub fn integer(self, name: Name, alias: Alias, values: impl IntoIterator<Item = impl Into<Option<i64>>>) -> Self {
         let array: Int64Array = values.into_iter().map(Into::into).collect();
         self.push(name, alias, "integer", DataType::Int64, Arc::new(array))
     }
 
     /// Append a boolean column (Arrow `Boolean`, dtype `"boolean"`).
-    pub fn boolean(
-        self,
-        name: impl Into<String>,
-        alias: impl Into<String>,
-        values: impl IntoIterator<Item = impl Into<Option<bool>>>,
-    ) -> Self {
+    pub fn boolean(self, name: Name, alias: Alias, values: impl IntoIterator<Item = impl Into<Option<bool>>>) -> Self {
         let array: BooleanArray = values.into_iter().map(Into::into).collect();
         self.push(name, alias, "boolean", DataType::Boolean, Arc::new(array))
     }
 
-    fn push(
-        mut self,
-        name: impl Into<String>,
-        alias: impl Into<String>,
-        dtype: &str,
-        data_type: DataType,
-        array: ArrayRef,
-    ) -> Self {
-        let alias = alias.into();
+    fn push(mut self, name: Name, alias: Alias, dtype: &str, data_type: DataType, array: ArrayRef) -> Self {
+        // The Arrow field name is the display alias — that's the name the host
+        // decodes the column under.
         let field = Field::new(alias.as_str(), data_type, true);
         self.cols.push(BuiltColumn {
             def: ColumnDef {
-                name: name.into(),
+                name,
                 alias,
                 dtype: dtype.to_string(),
             },
@@ -229,7 +245,7 @@ impl FrameBuilder {
         for c in &self.cols {
             if c.array.len() != len {
                 return Err(Error::RaggedColumns {
-                    column: c.def.alias.clone(),
+                    column: c.def.alias.to_string(),
                     expected: len,
                     got: c.array.len(),
                 });
@@ -372,20 +388,22 @@ pub fn data_frame_ipc(schema: &[ColumnDef], data: &serde_json::Value) -> Result<
     let mut builder = Frame::builder();
     for col in schema {
         let (name, alias) = (col.name.clone(), col.alias.clone());
+        // Cells are looked up under the source name (the JSON key), never the alias.
+        let key = col.name.as_str();
         builder = match col.dtype.as_str() {
-            "number" | "float" => builder.number(name, alias, cells(data, &col.name, as_f64)),
-            "integer" | "int" => builder.integer(name, alias, cells(data, &col.name, as_i64)),
-            "boolean" | "bool" => builder.boolean(name, alias, cells(data, &col.name, as_bool)),
+            "number" | "float" => builder.number(name, alias, cells(data, key, as_f64)),
+            "integer" | "int" => builder.integer(name, alias, cells(data, key, as_i64)),
+            "boolean" | "bool" => builder.boolean(name, alias, cells(data, key, as_bool)),
             "date" => {
                 // Policy B (d:temporal-native-when-lossless): native Date32 when
                 // every cell parses as ISO, else keep the column as strings.
-                let strings = cells(data, &col.name, as_text);
+                let strings = cells(data, key, as_text);
                 match try_iso_days(&strings) {
                     Some(days) => builder.date32(name, alias, days),
                     None => builder.date(name, alias, strings),
                 }
             }
-            _ => builder.text(name, alias, cells(data, &col.name, as_text)),
+            _ => builder.text(name, alias, cells(data, key, as_text)),
         };
     }
     Ok(builder.build()?.into_parts().1)
@@ -454,18 +472,18 @@ mod tests {
 
         // SDK builder side: Arrow `Utf8`. Read back by the column alias.
         let frame = Frame::builder()
-            .text("k", "Key", [Some("ab".to_string()), None, Some("c".to_string())])
+            .text(Name::new("k"), Alias::new("Key"), [
+                Some("ab".to_string()),
+                None,
+                Some("c".to_string()),
+            ])
             .build()
             .unwrap();
         assert_eq!(column_strings(frame.arrow_ipc(), "Key").unwrap(), want);
 
         // Host side: polars encodes string columns as `Utf8View` — the buffer a
         // host-data cursor actually yields. column_strings must read it too.
-        let core_schema = vec![emporium_core::column::Def {
-            name: "k".into(),
-            alias: "Key".into(),
-            dtype: "string".into(),
-        }];
+        let core_schema = vec![emporium_core::column::Def::new("k", "Key", "string")];
         let ipc = emporium_core::tool::data_frame::to_arrow_ipc(
             &core_schema,
             &serde_json::json!([{"k": "ab"}, {"k": null}, {"k": "c"}]),
@@ -498,8 +516,8 @@ mod tests {
     #[test]
     fn data_frame_ipc_dates_native_when_lossless_else_string() {
         let schema = vec![ColumnDef {
-            name: "d".into(),
-            alias: "D".into(),
+            name: Name::new("d"),
+            alias: Alias::new("D"),
             dtype: "date".into(),
         }];
 
@@ -521,13 +539,13 @@ mod tests {
         // it unchanged — no decimal string in between.
         let schema = vec![
             ColumnDef {
-                name: "d".into(),
-                alias: "D".into(),
+                name: Name::new("d"),
+                alias: Alias::new("D"),
                 dtype: "date".into(),
             },
             ColumnDef {
-                name: "v".into(),
-                alias: "V".into(),
+                name: Name::new("v"),
+                alias: Alias::new("V"),
                 dtype: "number".into(),
             },
         ];
@@ -550,8 +568,8 @@ mod tests {
     #[test]
     fn data_frame_ipc_column_oriented_and_null() {
         let schema = vec![ColumnDef {
-            name: "k".into(),
-            alias: "K".into(),
+            name: Name::new("k"),
+            alias: Alias::new("K"),
             dtype: "string".into(),
         }];
         let cols = serde_json::json!({ "k": ["a", "b", "c"] });
@@ -565,8 +583,11 @@ mod tests {
     #[test]
     fn frame_round_trips_through_host_polars_reader() {
         let frame = Frame::builder()
-            .text("symbol", "Symbol", ["AAPL".to_string(), "MSFT".to_string()])
-            .number("close", "Close", [195.0_f64, 410.5])
+            .text(Name::new("symbol"), Alias::new("Symbol"), [
+                "AAPL".to_string(),
+                "MSFT".to_string(),
+            ])
+            .number(Name::new("close"), Alias::new("Close"), [195.0_f64, 410.5])
             .build()
             .unwrap();
 
@@ -584,7 +605,10 @@ mod tests {
         // representable, and a JSON decimal round-trip drifts ~6.6% of cells by
         // 1 ULP. Through the SDK → arrow → host path it must be bit-exact.
         let vals: Vec<f64> = (0..256).map(|i| 100.0 + i as f64 * 0.37 + 0.4).collect();
-        let frame = Frame::builder().number("v", "v", vals.clone()).build().unwrap();
+        let frame = Frame::builder()
+            .number(Name::new("v"), Alias::new("v"), vals.clone())
+            .build()
+            .unwrap();
 
         let df = from_arrow_ipc(frame.arrow_ipc()).unwrap();
         let col = df.column("v").unwrap().as_materialized_series().f64().unwrap();
@@ -596,8 +620,8 @@ mod tests {
     #[test]
     fn nulls_round_trip() {
         let frame = Frame::builder()
-            .number("n", "N", [Some(1.5_f64), None, Some(2.25)])
-            .boolean("flag", "Flag", [Some(true), Some(false), None])
+            .number(Name::new("n"), Alias::new("N"), [Some(1.5_f64), None, Some(2.25)])
+            .boolean(Name::new("flag"), Alias::new("Flag"), [Some(true), Some(false), None])
             .build()
             .unwrap();
 
@@ -611,8 +635,8 @@ mod tests {
     #[test]
     fn ragged_columns_rejected() {
         let err = Frame::builder()
-            .text("a", "A", ["x".to_string()])
-            .number("b", "B", [1.0_f64, 2.0])
+            .text(Name::new("a"), Alias::new("A"), ["x".to_string()])
+            .number(Name::new("b"), Alias::new("B"), [1.0_f64, 2.0])
             .build()
             .unwrap_err();
         assert!(matches!(err, Error::RaggedColumns {
@@ -624,17 +648,23 @@ mod tests {
 
     #[test]
     fn schema_carries_name_alias_dtype() {
-        let frame = Frame::builder().text("key", "Key", ["a".to_string()]).build().unwrap();
+        let frame = Frame::builder()
+            .text(Name::new("key"), Alias::new("Key"), ["a".to_string()])
+            .build()
+            .unwrap();
         let schema = frame.schema();
         assert_eq!(schema.len(), 1);
-        assert_eq!(schema[0].name, "key");
-        assert_eq!(schema[0].alias, "Key");
+        assert_eq!(schema[0].name.as_str(), "key");
+        assert_eq!(schema[0].alias.as_str(), "Key");
         assert_eq!(schema[0].dtype, "string");
     }
 
     #[test]
     fn escape_hatch_preserves_bytes() {
-        let frame = Frame::builder().integer("i", "I", [1_i64, 2, 3]).build().unwrap();
+        let frame = Frame::builder()
+            .integer(Name::new("i"), Alias::new("I"), [1_i64, 2, 3])
+            .build()
+            .unwrap();
         let (schema, ipc) = frame.into_parts();
         let wrapped = Frame::from_ipc_bytes(schema.clone(), ipc.clone());
         assert_eq!(wrapped.arrow_ipc(), ipc.as_slice());
