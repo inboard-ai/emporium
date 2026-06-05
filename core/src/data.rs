@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::column;
 
+pub mod source;
+
 /// One pullable source within a configured extension instance.
 ///
 /// `input` says how the host gathers what [`fetch`](crate) needs; `output` says
