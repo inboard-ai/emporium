@@ -263,11 +263,7 @@ mod tests {
 
     #[test]
     fn with_source_preserves_other_fields_on_data_frame() {
-        let col = column::Def {
-            name: "k".to_string(),
-            alias: "k".to_string(),
-            dtype: "string".to_string(),
-        };
+        let col = column::Def::new("k", "k", "string");
         let df = Output::columnar(serde_json::json!([{"k": "v"}]), vec![col], None)
             .unwrap()
             .with_label(Label::new("lab"))
@@ -288,11 +284,7 @@ mod tests {
 
     #[test]
     fn data_frame_output_is_serde_roundtripable() {
-        let col = column::Def {
-            name: "k".to_string(),
-            alias: "K".to_string(),
-            dtype: "string".to_string(),
-        };
+        let col = column::Def::new("k", "K", "string");
         let output = Output::columnar(serde_json::json!([{"k": "v"}]), vec![col], None)
             .unwrap()
             .with_label(Label::new("L"))
@@ -308,16 +300,12 @@ mod tests {
 
     #[test]
     fn columnar_constructs_data_frame_variant() {
-        let col = column::Def {
-            name: "k".to_string(),
-            alias: "K".to_string(),
-            dtype: "string".to_string(),
-        };
+        let col = column::Def::new("k", "K", "string");
         let output = Output::columnar(serde_json::json!([{"k": "v"}]), vec![col], None).unwrap();
         match output {
             Output::DataFrame(df) => {
                 assert_eq!(df.schema.len(), 1);
-                assert_eq!(df.schema[0].name, "k");
+                assert_eq!(df.schema[0].name.as_str(), "k");
             }
             _ => panic!("expected DataFrame variant"),
         }

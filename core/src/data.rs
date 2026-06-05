@@ -222,15 +222,11 @@ mod tests {
 
     #[test]
     fn output_spec_rows_roundtrips() {
-        let spec = OutputSpec::Rows(vec![column::Def {
-            name: "close".into(),
-            alias: "Close".into(),
-            dtype: "number".into(),
-        }]);
+        let spec = OutputSpec::Rows(vec![column::Def::new("close", "Close", "number")]);
         let json = serde_json::to_string(&spec).unwrap();
         let back: OutputSpec = serde_json::from_str(&json).unwrap();
         match back {
-            OutputSpec::Rows(cols) => assert_eq!(cols[0].name, "close"),
+            OutputSpec::Rows(cols) => assert_eq!(cols[0].name.as_str(), "close"),
             other => panic!("expected Rows, got {other:?}"),
         }
     }

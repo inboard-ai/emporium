@@ -65,9 +65,11 @@ macro_rules! impl_tool_and_events {
 
         impl From<$col_mod::ColumnDef> for column::Def {
             fn from(c: $col_mod::ColumnDef) -> Self {
+                // The wire carries bare strings; lift them into the distinct
+                // name/alias newtypes so they can't be swapped host-side.
                 column::Def {
-                    name: c.name,
-                    alias: c.alias,
+                    name: column::Name::new(c.name),
+                    alias: column::Alias::new(c.alias),
                     dtype: c.dtype,
                 }
             }
@@ -268,9 +270,10 @@ impl_formula!(full_fp);
 // to full-extension (only world that imports `host-data`).
 impl From<column::Def> for full_types::ColumnDef {
     fn from(c: column::Def) -> Self {
+        // Lower the typed identities back to bare strings for the WIT wire.
         full_types::ColumnDef {
-            name: c.name,
-            alias: c.alias,
+            name: c.name.into_string(),
+            alias: c.alias.into_string(),
             dtype: c.dtype,
         }
     }

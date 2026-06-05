@@ -1917,11 +1917,7 @@ mod tests {
         // Build the Arrow IPC wire payload the way an extension will: encode a
         // real row-oriented frame to IPC bytes (R1 wire swap — was a JSON `rows`
         // string).
-        let kv_schema = vec![emporium_core::column::Def {
-            name: "k".into(),
-            alias: "Key".into(),
-            dtype: "string".into(),
-        }];
+        let kv_schema = vec![emporium_core::column::Def::new("k", "Key", "string")];
         let arrow_ipc =
             emporium_core::tool::data_frame::to_arrow_ipc(&kv_schema, &serde_json::json!([{"k": "a"}, {"k": "b"}]))
                 .unwrap();
@@ -1945,8 +1941,8 @@ mod tests {
         match out {
             tool::Output::DataFrame(df) => {
                 assert_eq!(df.schema.len(), 1);
-                assert_eq!(df.schema[0].name, "k");
-                assert_eq!(df.schema[0].alias, "Key");
+                assert_eq!(df.schema[0].name.as_str(), "k");
+                assert_eq!(df.schema[0].alias.as_str(), "Key");
                 assert_eq!(df.schema[0].dtype, "string");
                 assert_eq!(df.metadata, Some(serde_json::json!({"source": "unit"})));
                 assert_eq!(df.label.as_ref().map(|l| l.0.as_str()), Some("kv"));
@@ -2126,11 +2122,7 @@ mod tests {
         // hands back the bindgen ColumnDef on host-data::get-schema.
         use full_bindings::emporium::extensions::types as wit_types_full;
 
-        let core = emporium_core::column::Def {
-            name: "k".into(),
-            alias: "Key".into(),
-            dtype: "string".into(),
-        };
+        let core = emporium_core::column::Def::new("k", "Key", "string");
         let wit: wit_types_full::ColumnDef = core.into();
         assert_eq!(wit.name, "k");
         assert_eq!(wit.alias, "Key");

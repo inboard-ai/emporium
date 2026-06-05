@@ -119,11 +119,7 @@ mod tests {
     use super::*;
 
     fn sample_schema() -> Vec<column::Def> {
-        vec![column::Def {
-            name: "key".into(),
-            alias: "Key".into(),
-            dtype: "string".into(),
-        }]
+        vec![column::Def::new("key", "Key", "string")]
     }
 
     /// Four single-column rows, encoded to an Arrow IPC buffer the way an

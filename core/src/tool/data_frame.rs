@@ -262,55 +262,57 @@ fn json_to_polars_columns(schema: &[column::Def], data: &Value) -> Result<polars
 
             for col_def in schema {
                 let dtype = to_dtype(&col_def.dtype);
-                let alias = col_def.alias.clone().into();
+                // Arrow/polars storage name is the display alias; row values are
+                // looked up under the source name (the JSON key).
+                let alias = col_def.alias.as_str();
 
                 let series = match dtype {
                     DataType::String | DataType::Date => {
                         let values: Vec<Option<String>> = arr
                             .iter()
                             .map(|item| {
-                                item.get(&col_def.name).and_then(|v| match v {
+                                item.get(col_def.name.as_str()).and_then(|v| match v {
                                     serde_json::Value::String(s) => Some(s.clone()),
                                     serde_json::Value::Null => None,
                                     other => Some(other.to_string()),
                                 })
                             })
                             .collect();
-                        Series::new(alias, values)
+                        Series::new(alias.into(), values)
                     }
                     DataType::Float64 => {
                         let values: Vec<Option<f64>> = arr
                             .iter()
-                            .map(|item| item.get(&col_def.name).and_then(parse_as_f64))
+                            .map(|item| item.get(col_def.name.as_str()).and_then(parse_as_f64))
                             .collect();
-                        Series::new(alias, values)
+                        Series::new(alias.into(), values)
                     }
                     DataType::Int64 => {
                         let values: Vec<Option<i64>> = arr
                             .iter()
-                            .map(|item| item.get(&col_def.name).and_then(parse_as_i64))
+                            .map(|item| item.get(col_def.name.as_str()).and_then(parse_as_i64))
                             .collect();
-                        Series::new(alias, values)
+                        Series::new(alias.into(), values)
                     }
                     DataType::Boolean => {
                         let values: Vec<Option<bool>> = arr
                             .iter()
-                            .map(|item| item.get(&col_def.name).and_then(parse_as_bool))
+                            .map(|item| item.get(col_def.name.as_str()).and_then(parse_as_bool))
                             .collect();
-                        Series::new(alias, values)
+                        Series::new(alias.into(), values)
                     }
                     _ => {
                         // Default to string representation for other types
                         let values: Vec<Option<String>> = arr
                             .iter()
                             .map(|item| {
-                                item.get(&col_def.name).and_then(|v| match v {
+                                item.get(col_def.name.as_str()).and_then(|v| match v {
                                     serde_json::Value::Null => None,
                                     other => Some(other.to_string()),
                                 })
                             })
                             .collect();
-                        Series::new(alias, values)
+                        Series::new(alias.into(), values)
                     }
                 };
                 columns_vec.push(Column::Series(series.into()));
@@ -329,10 +331,12 @@ fn json_to_polars_columns(schema: &[column::Def], data: &Value) -> Result<polars
             let mut max_rows = 0usize;
 
             for col_def in schema {
-                let alias = col_def.alias.clone().into();
+                // Arrow/polars storage name is the display alias; the column is
+                // looked up under the source name (the JSON key).
+                let alias = col_def.alias.as_str();
                 let dtype = to_dtype(&col_def.dtype);
 
-                if let Some(col_data) = obj.get(&col_def.name) {
+                if let Some(col_data) = obj.get(col_def.name.as_str()) {
                     let series = match col_data {
                         Value::Array(values) => {
                             max_rows = max_rows.max(values.len());
@@ -347,19 +351,19 @@ fn json_to_polars_columns(schema: &[column::Def], data: &Value) -> Result<polars
                                             other => Some(other.to_string()),
                                         })
                                         .collect();
-                                    Series::new(alias, parsed)
+                                    Series::new(alias.into(), parsed)
                                 }
                                 DataType::Float64 => {
                                     let parsed: Vec<Option<f64>> = values.iter().map(parse_as_f64).collect();
-                                    Series::new(alias, parsed)
+                                    Series::new(alias.into(), parsed)
                                 }
                                 DataType::Int64 => {
                                     let parsed: Vec<Option<i64>> = values.iter().map(parse_as_i64).collect();
-                                    Series::new(alias, parsed)
+                                    Series::new(alias.into(), parsed)
                                 }
                                 DataType::Boolean => {
                                     let parsed: Vec<Option<bool>> = values.iter().map(parse_as_bool).collect();
-                                    Series::new(alias, parsed)
+                                    Series::new(alias.into(), parsed)
                                 }
                                 _ => {
                                     // Default to string
@@ -371,7 +375,7 @@ fn json_to_polars_columns(schema: &[column::Def], data: &Value) -> Result<polars
                                             other => Some(other.to_string()),
                                         })
                                         .collect();
-                                    Series::new(alias, parsed)
+                                    Series::new(alias.into(), parsed)
                                 }
                             }
                         }
@@ -387,18 +391,18 @@ fn json_to_polars_columns(schema: &[column::Def], data: &Value) -> Result<polars
                                         Value::String(s) => Some(s.clone()),
                                         other => Some(other.to_string()),
                                     };
-                                    Series::new(alias, vec![value])
+                                    Series::new(alias.into(), vec![value])
                                 }
-                                DataType::Float64 => Series::new(alias, vec![parse_as_f64(col_data)]),
-                                DataType::Int64 => Series::new(alias, vec![parse_as_i64(col_data)]),
-                                DataType::Boolean => Series::new(alias, vec![parse_as_bool(col_data)]),
+                                DataType::Float64 => Series::new(alias.into(), vec![parse_as_f64(col_data)]),
+                                DataType::Int64 => Series::new(alias.into(), vec![parse_as_i64(col_data)]),
+                                DataType::Boolean => Series::new(alias.into(), vec![parse_as_bool(col_data)]),
                                 _ => {
                                     let value = match col_data {
                                         Value::Null => None,
                                         Value::String(s) => Some(s.clone()),
                                         other => Some(other.to_string()),
                                     };
-                                    Series::new(alias, vec![value])
+                                    Series::new(alias.into(), vec![value])
                                 }
                             }
                         }
@@ -408,11 +412,11 @@ fn json_to_polars_columns(schema: &[column::Def], data: &Value) -> Result<polars
                     // Column not found in data, create empty column with nulls
                     // We'll resize it to max_rows after processing all columns
                     let series = match dtype {
-                        DataType::String | DataType::Date => Series::new(alias, Vec::<Option<String>>::new()),
-                        DataType::Float64 => Series::new(alias, Vec::<Option<f64>>::new()),
-                        DataType::Int64 => Series::new(alias, Vec::<Option<i64>>::new()),
-                        DataType::Boolean => Series::new(alias, Vec::<Option<bool>>::new()),
-                        _ => Series::new(alias, Vec::<Option<String>>::new()),
+                        DataType::String | DataType::Date => Series::new(alias.into(), Vec::<Option<String>>::new()),
+                        DataType::Float64 => Series::new(alias.into(), Vec::<Option<f64>>::new()),
+                        DataType::Int64 => Series::new(alias.into(), Vec::<Option<i64>>::new()),
+                        DataType::Boolean => Series::new(alias.into(), Vec::<Option<bool>>::new()),
+                        _ => Series::new(alias.into(), Vec::<Option<String>>::new()),
                     };
                     columns_vec.push(Column::Series(series.into()));
                 }
@@ -579,16 +583,8 @@ mod tests {
 
     fn two_col_schema() -> Vec<column::Def> {
         vec![
-            column::Def {
-                name: "a".to_string(),
-                alias: "A".to_string(),
-                dtype: "integer".to_string(),
-            },
-            column::Def {
-                name: "b".to_string(),
-                alias: "B".to_string(),
-                dtype: "string".to_string(),
-            },
+            column::Def::new("a", "A", "integer"),
+            column::Def::new("b", "B", "string"),
         ]
     }
 
@@ -707,16 +703,8 @@ mod tests {
     #[test]
     fn arrow_ipc_preserves_dtypes_and_nulls() {
         let schema = vec![
-            column::Def {
-                name: "n".into(),
-                alias: "N".into(),
-                dtype: "number".into(),
-            },
-            column::Def {
-                name: "flag".into(),
-                alias: "Flag".into(),
-                dtype: "boolean".into(),
-            },
+            column::Def::new("n", "N", "number"),
+            column::Def::new("flag", "Flag", "boolean"),
         ];
         let data = json!([
             {"n": 1.5, "flag": true},
@@ -737,11 +725,7 @@ mod tests {
         // shortest decimal string (which is what a JSON wire round-trips
         // through). Arrow carries the source f64 verbatim, so the IPC round-trip
         // is bit-exact — the property the data-transport design relies on.
-        let schema = vec![column::Def {
-            name: "v".into(),
-            alias: "v".into(),
-            dtype: "number".into(),
-        }];
+        let schema = vec![column::Def::new("v", "v", "number")];
         let vals: Vec<f64> = (0..256).map(|i| 100.0 + i as f64 * 0.37 + 0.4).collect();
         let data = Value::Array(vals.iter().map(|v| json!({ "v": v })).collect());
 
@@ -764,11 +748,7 @@ mod tests {
 
     #[test]
     fn json_to_polars_promotes_all_iso_dates_else_keeps_string() {
-        let schema = vec![column::Def {
-            name: "d".to_string(),
-            alias: "D".to_string(),
-            dtype: "date".to_string(),
-        }];
+        let schema = vec![column::Def::new("d", "D", "date")];
 
         // Every cell ISO → native polars Date.
         let native = json_to_polars(&schema, &json!([{"d": "2024-01-02"}, {"d": "2024-01-03"}])).unwrap();
