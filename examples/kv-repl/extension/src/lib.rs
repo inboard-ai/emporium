@@ -398,7 +398,7 @@ fn execute_tool(name: &str, params: &Value) -> Result<ToolOutput, String> {
             // Build columnar output with the guest SDK: native String values go
             // straight into an Arrow IPC buffer — no JSON rows string, no parse.
             let frame = emporium_sdk::Frame::builder()
-                .text("key", "Key", keys)
+                .text(emporium_sdk::Name::new("key"), emporium_sdk::Alias::new("Key"), keys)
                 .build()
                 .map_err(|err| err.to_string())?;
             let (schema, arrow_ipc) = frame.into_parts();
@@ -450,8 +450,8 @@ fn data_frame_output(schema: Vec<ColumnDef>, arrow_ipc: Vec<u8>) -> ToolOutput {
 fn map_schema(defs: Vec<emporium_sdk::ColumnDef>) -> Vec<ColumnDef> {
     defs.into_iter()
         .map(|d| ColumnDef {
-            name: d.name,
-            alias: d.alias,
+            name: d.name.into_string(),
+            alias: d.alias.into_string(),
             dtype: d.dtype,
         })
         .collect()

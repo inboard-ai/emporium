@@ -98,11 +98,7 @@ fn main() -> wasmtime::Result<()> {
     let defs: Vec<column::Def> = frames
         .call_schema(&mut store)?
         .iter()
-        .map(|c| column::Def {
-            name: c.name.clone(),
-            alias: c.name.clone(),
-            dtype: c.dtype.clone(),
-        })
+        .map(|c| column::Def::new(c.name.clone(), c.name.clone(), c.dtype.clone()))
         .collect();
 
     let title = format!("data-frame wire: JSON string vs Arrow IPC · n={n} · {iters} iters");

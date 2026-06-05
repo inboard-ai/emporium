@@ -484,8 +484,8 @@ async fn run_toy_plan(ext: &Extension, plan_json: &str) {
     let key_col = df
         .schema
         .iter()
-        .find(|c| c.name == "key")
-        .map(|c| c.alias.clone())
+        .find(|c| c.name.as_str() == "key")
+        .map(|c| c.alias.as_str().to_string())
         .unwrap_or_else(|| "key".to_string());
     let rows = match df.to_json_rows() {
         Ok(rows) => rows,
@@ -559,11 +559,7 @@ const KV_KEYS_RESOURCE: &str = "kv-keys";
 /// Schema of the `kv-keys` host-data resource: one row per key, with a single
 /// `key` column. Matches what the kv-extension's `analyze_keys` expects.
 fn kv_keys_schema() -> Vec<column::Def> {
-    vec![column::Def {
-        name: "key".to_string(),
-        alias: "Key".to_string(),
-        dtype: "string".to_string(),
-    }]
+    vec![column::Def::new("key", "Key", "string")]
 }
 
 /// Mirror the KV store's current keys into the shared host-data `kv-keys`

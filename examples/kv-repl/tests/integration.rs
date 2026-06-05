@@ -341,11 +341,7 @@ async fn formula_kv_exists_returns_boolean() {
 }
 
 fn kv_keys_schema() -> Vec<column::Def> {
-    vec![column::Def {
-        name: "key".to_string(),
-        alias: "Key".to_string(),
-        dtype: "string".to_string(),
-    }]
+    vec![column::Def::new("key", "Key", "string")]
 }
 
 /// Encode JSON rows to an Arrow IPC buffer the way an extension hands data in,
