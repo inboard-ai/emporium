@@ -344,14 +344,14 @@ pub(crate) enum Request {
         /// Channel used to deliver the reply.
         reply: oneshot::Sender<Result<data::Page, Error>>,
     },
-    /// Resolve a source's output schema for a given selection.
-    OutputSchema {
+    /// Resolve a source's output shape for a given selection.
+    Describe {
         /// Source identifier.
         source: String,
         /// JSON-encoded `Selection`.
         selection: String,
         /// Channel used to deliver the reply.
-        reply: oneshot::Sender<Result<data::OutputSpec, Error>>,
+        reply: oneshot::Sender<Result<data::source::Shape, Error>>,
     },
     /// Fetch result data for a selection against a source.
     Fetch {
@@ -1199,7 +1199,7 @@ async fn handle_tool_request(request: Request, bindings: &ToolExtension, store: 
         Request::Browse { reply, .. } => {
             let _ = reply.send(Err(Error::UnsupportedWorld(DEFAULT_WORLD.to_string())));
         }
-        Request::OutputSchema { reply, .. } => {
+        Request::Describe { reply, .. } => {
             let _ = reply.send(Err(Error::UnsupportedWorld(DEFAULT_WORLD.to_string())));
         }
         Request::Fetch { reply, .. } => {
@@ -1265,7 +1265,7 @@ async fn handle_block_request(request: Request, bindings: &BlockExtension, store
         Request::Browse { reply, .. } => {
             let _ = reply.send(Err(Error::UnsupportedWorld(BLOCK_WORLD.to_string())));
         }
-        Request::OutputSchema { reply, .. } => {
+        Request::Describe { reply, .. } => {
             let _ = reply.send(Err(Error::UnsupportedWorld(BLOCK_WORLD.to_string())));
         }
         Request::Fetch { reply, .. } => {
@@ -1329,7 +1329,7 @@ async fn handle_rich_request(request: Request, bindings: &RichExtension, store: 
         Request::Browse { reply, .. } => {
             let _ = reply.send(Err(Error::UnsupportedWorld(RICH_WORLD.to_string())));
         }
-        Request::OutputSchema { reply, .. } => {
+        Request::Describe { reply, .. } => {
             let _ = reply.send(Err(Error::UnsupportedWorld(RICH_WORLD.to_string())));
         }
         Request::Fetch { reply, .. } => {
@@ -1579,7 +1579,7 @@ async fn handle_full_request(request: Request, bindings: &FullExtension, store: 
         Request::Browse { reply, .. } => {
             let _ = reply.send(Err(Error::UnsupportedWorld(FULL_WORLD.to_string())));
         }
-        Request::OutputSchema { reply, .. } => {
+        Request::Describe { reply, .. } => {
             let _ = reply.send(Err(Error::UnsupportedWorld(FULL_WORLD.to_string())));
         }
         Request::Fetch { reply, .. } => {
@@ -1732,12 +1732,12 @@ async fn handle_data_request(request: Request, bindings: &DataExtension, store: 
             let outcome = data_browse(bindings, store, &source, &path, cursor.as_deref(), limit).await;
             let _ = reply.send(outcome);
         }
-        Request::OutputSchema {
+        Request::Describe {
             source,
             selection,
             reply,
         } => {
-            let outcome = data_output_schema(bindings, store, &source, &selection).await;
+            let outcome = data_describe(bindings, store, &source, &selection).await;
             let _ = reply.send(outcome);
         }
         Request::Fetch {
@@ -1808,16 +1808,17 @@ async fn data_browse(
     data::Page::try_from(wit_page)
 }
 
-async fn data_output_schema(
+async fn data_describe(
     bindings: &DataExtension,
     store: &mut Store<State>,
     source: &str,
     selection: &str,
-) -> Result<data::OutputSpec, Error> {
+) -> Result<data::source::Shape, Error> {
     let guest = bindings.emporium_extensions_data_provider();
+    // WIT interface name stays `output-schema` for wire compat; Rust API is `describe`.
     let wit_outcome = guest.call_output_schema(&mut *store, source, selection).await?;
     let wit_spec = wit_outcome.map_err(|e| Error::Data(data::Error::from(e)))?;
-    data::OutputSpec::try_from(wit_spec)
+    data::source::Shape::try_from(wit_spec)
 }
 
 async fn data_fetch(

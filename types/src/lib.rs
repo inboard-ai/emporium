@@ -60,6 +60,9 @@ pub struct ManifestDataSource {
     /// Statically-known output columns — present when `output` is `"known"`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub columns: Vec<ManifestColumn>,
+    /// Row-level cardinality: `"rows"` (default), `"record"`, or `"scalar"`.
+    #[serde(default)]
+    pub cardinality: String,
 }
 
 /// A statically-declared output column on a [`ManifestDataSource`]. Mirrors the

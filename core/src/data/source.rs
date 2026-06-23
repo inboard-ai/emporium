@@ -1,13 +1,50 @@
-//! A data source's identity.
-//!
-//! [`Id`] is the stable id a `data-provider` extension declares for one of its
-//! sources. A newtype so it cannot be swapped with an `extension::Id` or a raw
-//! string at a boundary — the [`column::Name`](crate::column::Name) precedent
-//! (see `d:column-identity-newtypes`).
+//! A data source: identity, input shape, output contract, and cardinality.
+
+pub mod input;
+pub mod output;
+
+pub use input::{FreeQuery, Input};
+pub use output::{Output, Shape};
 
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+
+/// One pullable source within a configured extension instance.
+///
+/// `input` says how the host gathers what [`fetch`](crate) needs; `output` says
+/// what the host knows about the result shape *before* fetch — the keystone that
+/// lets the measure/axis pickers light up immediately for a [`Known`] schema.
+///
+/// [`Known`]: Output::Known
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Source {
+    /// Stable identifier within the extension.
+    pub id: String,
+    /// Human-facing name shown in the picker.
+    pub display_name: String,
+    /// One-line description of what the source returns.
+    pub description: String,
+    /// How the host gathers fetch inputs.
+    pub input: Input,
+    /// What the host knows about output shape before fetch.
+    pub output: Output,
+    /// Row-level cardinality: tabular relation, single observation, or scalar.
+    #[serde(default)]
+    pub cardinality: Cardinality,
+}
+
+/// Row-level cardinality of a data source's output.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Cardinality {
+    /// Tabular relation (enables aggregation).
+    #[default]
+    Rows,
+    /// Single observation (blocks aggregation).
+    Record,
+    /// One headline value.
+    Scalar,
+}
 
 /// The stable identifier of a data source within its extension. Serializes
 /// transparently as a bare string, so the WIT / JSON / persisted-binding wire is

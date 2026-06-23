@@ -85,12 +85,12 @@ impl Provider {
     }
 
     /// Resolve the output schema for a settled selection — used when a source's
-    /// output contract is [`Resolved`](data::OutputContract::Resolved). v1b.
-    pub async fn output_schema(&self, source: &str, selection: &data::Selection) -> Result<data::OutputSpec, Error> {
+    /// output contract is [`Resolved`](data::source::Output::Resolved). v1b.
+    pub async fn describe(&self, source: &str, selection: &data::Selection) -> Result<data::source::Shape, Error> {
         let selection = selection.to_json()?;
         let (reply_tx, reply_rx) = oneshot::channel();
         self.sender
-            .send(Request::OutputSchema {
+            .send(Request::Describe {
                 source: source.to_string(),
                 selection,
                 reply: reply_tx,
@@ -155,7 +155,7 @@ mod tests {
             Error::ExtensionCrashed
         ));
         assert!(matches!(
-            provider.output_schema("src", &sel).await.expect_err("output_schema"),
+            provider.describe("src", &sel).await.expect_err("describe"),
             Error::ExtensionCrashed
         ));
         assert!(matches!(

@@ -13,73 +13,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::column;
-
 pub mod source;
 
-/// One pullable source within a configured extension instance.
-///
-/// `input` says how the host gathers what [`fetch`](crate) needs; `output` says
-/// what the host knows about the result shape *before* fetch — the keystone that
-/// lets the measure/axis pickers light up immediately for a [`Known`] schema.
-///
-/// [`Known`]: OutputContract::Known
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Source {
-    /// Stable identifier within the extension.
-    pub id: String,
-    /// Human-facing name shown in the picker.
-    pub display_name: String,
-    /// One-line description of what the source returns.
-    pub description: String,
-    /// How the host gathers fetch inputs.
-    pub input: InputSpec,
-    /// What the host knows about output shape before fetch.
-    pub output: OutputContract,
-}
-
-/// How the host gathers what `fetch` needs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum InputSpec {
-    /// Typed param form driven by a JSON Schema (parsed). v1a.
-    Params(serde_json::Value),
-    /// Drill-down tree via `browse`. v1b.
-    Browse,
-    /// A browse selection plus params layered on top. v1b+.
-    ParamsAndBrowse(serde_json::Value),
-    /// Free-form text the extension compiles into a query. v1b.
-    FreeQuery(FreeQuerySpec),
-}
-
-/// Editor hint for a [`InputSpec::FreeQuery`] source.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FreeQuerySpec {
-    /// Language hint for the host editor (`"sql"`, `"promql"`, `"text"`, …).
-    pub language: String,
-    /// Placeholder text for the empty editor.
-    pub placeholder: String,
-}
-
-/// What the host knows about output shape before fetch — the keystone.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum OutputContract {
-    /// Statically known regardless of input; the host seeds schema immediately.
-    Known(OutputSpec),
-    /// Knowable only after the selection is made; the host calls
-    /// `output_schema(source, selection)` once the user has chosen. v1b.
-    Resolved,
-}
-
-/// The shape of a source's output.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum OutputSpec {
-    /// Tabular relation with a known column set.
-    Rows(Vec<column::Def>),
-    /// A single headline value.
-    Scalar(column::Def),
-    /// A complete resource the host references without reshaping. v2.
-    Finished,
-}
+pub use source::Source;
 
 /// One node in a `browse` drill-down. v1b.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,8 +28,8 @@ pub struct Node {
     /// `false` => a selectable leaf.
     pub branch: bool,
     /// Present on leaves whose output shape is known at browse time, letting the
-    /// host skip a separate `output_schema` round-trip.
-    pub output: Option<OutputSpec>,
+    /// host skip a separate `describe` round-trip.
+    pub output: Option<source::Shape>,
 }
 
 /// One page of `browse` results. v1b.
@@ -105,7 +41,7 @@ pub struct Page {
     pub next_cursor: Option<String>,
 }
 
-/// Everything `fetch` / `output_schema` need, host -> extension.
+/// Everything `fetch` / `describe` need, host -> extension.
 ///
 /// Crosses the WIT boundary as a JSON string; [`Selection::to_json`] /
 /// [`Selection::from_json`] are the canonical (de)serializers. For `params`
@@ -199,6 +135,7 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::column;
 
     #[test]
     fn selection_json_roundtrips_and_omits_empty_fields() {
@@ -223,13 +160,32 @@ mod tests {
     }
 
     #[test]
-    fn output_spec_rows_roundtrips() {
-        let spec = OutputSpec::Rows(vec![column::Def::new("close", "Close", "number")]);
+    fn output_shape_rows_roundtrips() {
+        let spec = source::Shape::Rows(vec![column::Def::new("close", "Close", "number")]);
         let json = serde_json::to_string(&spec).unwrap();
-        let back: OutputSpec = serde_json::from_str(&json).unwrap();
+        let back: source::Shape = serde_json::from_str(&json).unwrap();
         match back {
-            OutputSpec::Rows(cols) => assert_eq!(cols[0].name.as_str(), "close"),
+            source::Shape::Rows(cols) => assert_eq!(cols[0].name.as_str(), "close"),
             other => panic!("expected Rows, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cardinality_defaults_to_rows() {
+        let c: source::Cardinality = Default::default();
+        assert_eq!(c, source::Cardinality::Rows);
+    }
+
+    #[test]
+    fn source_without_cardinality_deserializes_to_rows() {
+        let json = serde_json::json!({
+            "id": "test",
+            "display_name": "Test",
+            "description": "A test source",
+            "input": { "Browse": null },
+            "output": "Resolved",
+        });
+        let src: source::Source = serde_json::from_value(json).unwrap();
+        assert_eq!(src.cardinality, source::Cardinality::Rows);
     }
 }

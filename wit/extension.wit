@@ -142,12 +142,23 @@ interface data-provider {
     // host gathers what `fetch` needs; `output` says what the host knows about
     // the result shape before fetch (the keystone — a known schema seeds the
     // measure/axis pickers immediately, no fetch required).
+    /// Row-level cardinality of a data source's output.
+    enum cardinality {
+        /// Tabular relation (enables aggregation).
+        rows,
+        /// Single observation (blocks aggregation).
+        single-record,
+        /// One headline value.
+        scalar,
+    }
+
     record data-source {
         id: string,
         display-name: string,
         description: string,
         input: input-spec,
         output: output-contract,
+        cardinality: cardinality,
     }
 
     // How the host gathers fetch inputs.

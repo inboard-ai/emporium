@@ -317,46 +317,46 @@ impl From<data_dp::DataError> for data::Error {
     }
 }
 
-impl TryFrom<data_dp::OutputSpec> for data::OutputSpec {
+impl TryFrom<data_dp::OutputSpec> for data::source::Shape {
     type Error = Error;
     fn try_from(spec: data_dp::OutputSpec) -> Result<Self, Self::Error> {
         Ok(match spec {
             data_dp::OutputSpec::Rows(cols) => {
-                data::OutputSpec::Rows(cols.into_iter().map(column::Def::from).collect())
+                data::source::Shape::Rows(cols.into_iter().map(column::Def::from).collect())
             }
-            data_dp::OutputSpec::Scalar(col) => data::OutputSpec::Scalar(col.into()),
-            data_dp::OutputSpec::Finished => data::OutputSpec::Finished,
+            data_dp::OutputSpec::Scalar(col) => data::source::Shape::Scalar(col.into()),
+            data_dp::OutputSpec::Finished => data::source::Shape::Finished,
         })
     }
 }
 
-impl From<data_dp::FreeQuerySpec> for data::FreeQuerySpec {
+impl From<data_dp::FreeQuerySpec> for data::source::FreeQuery {
     fn from(s: data_dp::FreeQuerySpec) -> Self {
-        data::FreeQuerySpec {
+        data::source::FreeQuery {
             language: s.language,
             placeholder: s.placeholder,
         }
     }
 }
 
-impl TryFrom<data_dp::InputSpec> for data::InputSpec {
+impl TryFrom<data_dp::InputSpec> for data::source::Input {
     type Error = Error;
     fn try_from(spec: data_dp::InputSpec) -> Result<Self, Self::Error> {
         Ok(match spec {
-            data_dp::InputSpec::Params(s) => data::InputSpec::Params(serde_json::from_str(&s)?),
-            data_dp::InputSpec::Browse => data::InputSpec::Browse,
-            data_dp::InputSpec::ParamsAndBrowse(s) => data::InputSpec::ParamsAndBrowse(serde_json::from_str(&s)?),
-            data_dp::InputSpec::FreeQuery(q) => data::InputSpec::FreeQuery(q.into()),
+            data_dp::InputSpec::Params(s) => data::source::Input::Params(serde_json::from_str(&s)?),
+            data_dp::InputSpec::Browse => data::source::Input::Browse,
+            data_dp::InputSpec::ParamsAndBrowse(s) => data::source::Input::ParamsAndBrowse(serde_json::from_str(&s)?),
+            data_dp::InputSpec::FreeQuery(q) => data::source::Input::FreeQuery(q.into()),
         })
     }
 }
 
-impl TryFrom<data_dp::OutputContract> for data::OutputContract {
+impl TryFrom<data_dp::OutputContract> for data::source::Output {
     type Error = Error;
     fn try_from(contract: data_dp::OutputContract) -> Result<Self, Self::Error> {
         Ok(match contract {
-            data_dp::OutputContract::Known(spec) => data::OutputContract::Known(spec.try_into()?),
-            data_dp::OutputContract::Resolved => data::OutputContract::Resolved,
+            data_dp::OutputContract::Known(spec) => data::source::Output::Known(spec.try_into()?),
+            data_dp::OutputContract::Resolved => data::source::Output::Resolved,
         })
     }
 }
@@ -370,7 +370,18 @@ impl TryFrom<data_dp::DataSource> for data::Source {
             description: src.description,
             input: src.input.try_into()?,
             output: src.output.try_into()?,
+            cardinality: src.cardinality.into(),
         })
+    }
+}
+
+impl From<data_dp::Cardinality> for data::source::Cardinality {
+    fn from(c: data_dp::Cardinality) -> Self {
+        match c {
+            data_dp::Cardinality::Rows => data::source::Cardinality::Rows,
+            data_dp::Cardinality::SingleRecord => data::source::Cardinality::Record,
+            data_dp::Cardinality::Scalar => data::source::Cardinality::Scalar,
+        }
     }
 }
 
@@ -381,7 +392,7 @@ impl TryFrom<data_dp::Node> for data::Node {
             id: node.id,
             label: node.label,
             branch: node.branch,
-            output: node.output.map(data::OutputSpec::try_from).transpose()?,
+            output: node.output.map(data::source::Shape::try_from).transpose()?,
         })
     }
 }

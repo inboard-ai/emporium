@@ -94,6 +94,8 @@ pub(crate) struct RawDataSource {
     pub output: String,
     #[serde(default)]
     pub columns: Vec<RawColumn>,
+    #[serde(default)]
+    pub cardinality: Option<String>,
 }
 
 /// Raw output column from `[[data_sources.columns]]` sub-tables.
@@ -239,6 +241,7 @@ impl RawManifest {
                             dtype: c.dtype,
                         })
                         .collect(),
+                    cardinality: d.cardinality.unwrap_or_default(),
                 })
             })
             .collect::<Result<Vec<_>, crate::Error>>()?;
