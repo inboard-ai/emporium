@@ -1,6 +1,6 @@
 // Emporium provider-based extension interfaces.
 // VS Code style: five interfaces + four additive worlds.
-package emporium:extensions@0.3.0;
+package emporium:extensions@0.4.0;
 
 // ----------------------------------------------------------------------------
 // Shared types (referenced by multiple interfaces — both exports and imports).
@@ -207,6 +207,17 @@ interface data-provider {
 
     // --- Browse (one level per call; paginated) — v1b ----------------------
 
+    // Kind of entity a node represents, rendered by the host as a chip beside
+    // the label (never baked into the label text). Typed cases are reserved
+    // for kinds the host styles distinctly; everything else starts life as
+    // `custom` ("materialized view", "custom object", "board", …) and is
+    // promoted to a typed case only once the host treats it specially.
+    variant node-tag {
+        table,
+        view,
+        custom(string),
+    }
+
     record node {
         id: string,
         label: string,
@@ -215,6 +226,8 @@ interface data-provider {
         branch: bool,
         // present on leaves whose output shape is known at browse time.
         output: option<output-spec>,
+        // present when the node kind is worth surfacing (e.g. view vs table).
+        tag: option<node-tag>,
     }
 
     record page {

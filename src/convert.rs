@@ -385,6 +385,16 @@ impl From<data_dp::Cardinality> for data::source::Cardinality {
     }
 }
 
+impl From<data_dp::NodeTag> for data::Tag {
+    fn from(t: data_dp::NodeTag) -> Self {
+        match t {
+            data_dp::NodeTag::Table => data::Tag::Table,
+            data_dp::NodeTag::View => data::Tag::View,
+            data_dp::NodeTag::Custom(s) => data::Tag::Custom(s),
+        }
+    }
+}
+
 impl TryFrom<data_dp::Node> for data::Node {
     type Error = Error;
     fn try_from(node: data_dp::Node) -> Result<Self, Self::Error> {
@@ -393,6 +403,7 @@ impl TryFrom<data_dp::Node> for data::Node {
             label: node.label,
             branch: node.branch,
             output: node.output.map(data::source::Shape::try_from).transpose()?,
+            tag: node.tag.map(data::Tag::from),
         })
     }
 }

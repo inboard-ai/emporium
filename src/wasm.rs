@@ -22,7 +22,7 @@ use crate::manifest::Manifest;
 /// WIT package namespace and identifier for the emporium extension interfaces.
 pub(crate) const WIT_PACKAGE: &str = "emporium:extensions";
 /// WIT package version currently supported by the host.
-pub(crate) const WIT_VERSION: &str = "0.3.0";
+pub(crate) const WIT_VERSION: &str = "0.4.0";
 
 /// Default world selected when a manifest does not declare one.
 pub(crate) const DEFAULT_WORLD: &str = "tool-extension";
@@ -113,7 +113,7 @@ pub(crate) mod full_bindings {
         imports: { default: async },
         exports: { default: async },
         with: {
-            "emporium:extensions/host-data@0.3.0.cursor": crate::host_data::Cursor,
+            "emporium:extensions/host-data@0.4.0.cursor": crate::host_data::Cursor,
         },
     });
 }

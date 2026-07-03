@@ -17,6 +17,21 @@ pub mod source;
 
 pub use source::Source;
 
+/// Kind of entity a browse [`Node`] represents, rendered by the host as a chip
+/// beside the label (never baked into the label text). Typed cases are reserved
+/// for kinds the host styles distinctly; everything else starts life as
+/// [`Custom`](Tag::Custom) ("materialized view", "custom object", "board", …)
+/// and is promoted to a typed case only once the host treats it specially.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Tag {
+    /// A base table.
+    Table,
+    /// A view (may be slower to fetch; not a base relation).
+    View,
+    /// Provider-specific kind the protocol has no typed case for yet.
+    Custom(String),
+}
+
 /// One node in a `browse` drill-down. v1b.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
@@ -30,6 +45,9 @@ pub struct Node {
     /// Present on leaves whose output shape is known at browse time, letting the
     /// host skip a separate `describe` round-trip.
     pub output: Option<source::Shape>,
+    /// Present when the node kind is worth surfacing (e.g. view vs table).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<Tag>,
 }
 
 /// One page of `browse` results. v1b.
