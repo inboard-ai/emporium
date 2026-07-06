@@ -67,10 +67,13 @@ macro_rules! impl_tool_and_events {
             fn from(c: $col_mod::ColumnDef) -> Self {
                 // The wire carries bare strings; lift them into the distinct
                 // name/alias newtypes so they can't be swapped host-side.
+                // `semantic` stays a bare string — the vocabulary is the
+                // host's, typed at its own decode boundary.
                 column::Def {
                     name: column::Name::new(c.name),
                     alias: column::Alias::new(c.alias),
                     dtype: c.dtype,
+                    semantic: c.semantic,
                 }
             }
         }
@@ -275,6 +278,7 @@ impl From<column::Def> for full_types::ColumnDef {
             name: c.name.into_string(),
             alias: c.alias.into_string(),
             dtype: c.dtype,
+            semantic: c.semantic,
         }
     }
 }

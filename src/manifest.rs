@@ -104,6 +104,8 @@ pub(crate) struct RawColumn {
     pub name: String,
     pub alias: String,
     pub dtype: String,
+    #[serde(default)]
+    pub semantic: Option<String>,
 }
 
 /// Raw manifest as stored in manifest.toml
@@ -239,6 +241,7 @@ impl RawManifest {
                             name: c.name,
                             alias: c.alias,
                             dtype: c.dtype,
+                            semantic: c.semantic,
                         })
                         .collect(),
                     cardinality: d.cardinality.unwrap_or_default(),

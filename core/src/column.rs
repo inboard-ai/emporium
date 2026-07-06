@@ -90,18 +90,34 @@ pub struct Def {
     pub alias: Alias,
     /// Data type (e.g., "string", "number", "date").
     pub dtype: String,
+    /// Declared meaning of the column's values (e.g., "url", "timestamp",
+    /// "delta", "weather-code"). A bare wire string: the vocabulary belongs
+    /// to the host, which types known strings and ignores unknown ones —
+    /// unknown values are forward tolerance, not an error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic: Option<String>,
 }
 
 impl Def {
-    /// Construct a column def from its three parts. Accepts anything
-    /// `Into<Name>`/`Into<Alias>` so call sites read naturally, while the field
-    /// types keep the two identities distinct thereafter.
+    /// Construct a column def from its three identity parts, with no declared
+    /// semantic. Accepts anything `Into<Name>`/`Into<Alias>` so call sites
+    /// read naturally, while the field types keep the two identities distinct
+    /// thereafter.
     pub fn new(name: impl Into<Name>, alias: impl Into<Alias>, dtype: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             alias: alias.into(),
             dtype: dtype.into(),
+            semantic: None,
         }
+    }
+
+    /// Declare the column's semantic tag (a host-vocabulary wire string such
+    /// as "url" or "weather-code").
+    #[must_use]
+    pub fn with_semantic(mut self, semantic: impl Into<String>) -> Self {
+        self.semantic = Some(semantic.into());
+        self
     }
 }
 
@@ -111,12 +127,22 @@ mod tests {
 
     #[test]
     fn serde_roundtrip_preserves_fields() {
-        let original = Def::new("foo", "Foo", "string");
+        let original = Def::new("foo", "Foo", "string").with_semantic("url");
         let encoded = serde_json::to_string(&original).unwrap();
         let decoded: Def = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded.name, original.name);
         assert_eq!(decoded.alias, original.alias);
         assert_eq!(decoded.dtype, original.dtype);
+        assert_eq!(decoded.semantic.as_deref(), Some("url"));
+    }
+
+    #[test]
+    fn semantic_absent_on_wire() {
+        // Untagged defs neither emit the field nor require it.
+        let json = serde_json::to_value(Def::new("a", "A", "string")).unwrap();
+        assert!(json.get("semantic").is_none());
+        let decoded: Def = serde_json::from_str(r#"{"name":"a","alias":"A","dtype":"string"}"#).unwrap();
+        assert_eq!(decoded.semantic, None);
     }
 
     #[test]

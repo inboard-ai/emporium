@@ -22,7 +22,7 @@ use crate::manifest::Manifest;
 /// WIT package namespace and identifier for the emporium extension interfaces.
 pub(crate) const WIT_PACKAGE: &str = "emporium:extensions";
 /// WIT package version currently supported by the host.
-pub(crate) const WIT_VERSION: &str = "0.4.0";
+pub(crate) const WIT_VERSION: &str = "0.5.0";
 
 /// Default world selected when a manifest does not declare one.
 pub(crate) const DEFAULT_WORLD: &str = "tool-extension";
@@ -113,7 +113,7 @@ pub(crate) mod full_bindings {
         imports: { default: async },
         exports: { default: async },
         with: {
-            "emporium:extensions/host-data@0.4.0.cursor": crate::host_data::Cursor,
+            "emporium:extensions/host-data@0.5.0.cursor": crate::host_data::Cursor,
         },
     });
 }
@@ -1133,6 +1133,16 @@ fn validate_world_exports(declared: &str, engine: &Engine, component: &Component
         .cloned()
         .collect();
     if !missing.is_empty() {
+        // A component whose exports match the required set by name but at a
+        // different package version was built against another protocol —
+        // report the version skew, not a bare missing-interface list.
+        if let Some(found) = stale_protocol_version(&missing, &actual) {
+            return Err(Error::ProtocolMismatch {
+                declared: declared.to_string(),
+                found,
+                expected: WIT_VERSION.to_string(),
+            });
+        }
         return Err(Error::WorldMissingExports {
             declared: declared.to_string(),
             missing,
@@ -1151,6 +1161,30 @@ fn validate_world_exports(declared: &str, engine: &Engine, component: &Component
     }
 
     Ok(())
+}
+
+/// The single package version every `missing` interface is actually exported
+/// at — the stale-protocol signature: the component matches the required
+/// export set by interface name but not by version. `None` when any required
+/// interface is absent outright (a genuinely missing export) or the exported
+/// versions disagree with each other.
+fn stale_protocol_version(missing: &[String], actual: &[String]) -> Option<String> {
+    let mut found: Option<String> = None;
+    for required in missing {
+        let (name, _) = required.rsplit_once('@')?;
+        let version = actual.iter().find_map(|export| {
+            let (export_name, export_version) = export.rsplit_once('@')?;
+            (export_name == name).then(|| export_version.to_string())
+        })?;
+        if let Some(previous) = &found {
+            if *previous != version {
+                return None;
+            }
+        } else {
+            found = Some(version);
+        }
+    }
+    found
 }
 
 /// Dispatch a single typed [`Request`] against the tool-extension bindings.
@@ -1928,6 +1962,7 @@ mod tests {
                 name: "k".into(),
                 alias: "Key".into(),
                 dtype: "string".into(),
+                semantic: Some("title".into()),
             }],
             arrow_ipc,
             metadata: Some(r#"{"source":"unit"}"#.into()),
@@ -1945,6 +1980,7 @@ mod tests {
                 assert_eq!(df.schema[0].name.as_str(), "k");
                 assert_eq!(df.schema[0].alias.as_str(), "Key");
                 assert_eq!(df.schema[0].dtype, "string");
+                assert_eq!(df.schema[0].semantic.as_deref(), Some("title"));
                 assert_eq!(df.metadata, Some(serde_json::json!({"source": "unit"})));
                 assert_eq!(df.label.as_ref().map(|l| l.0.as_str()), Some("kv"));
                 assert_eq!(df.source.as_deref(), Some("unit"));
@@ -2123,11 +2159,31 @@ mod tests {
         // hands back the bindgen ColumnDef on host-data::get-schema.
         use full_bindings::emporium::extensions::types as wit_types_full;
 
-        let core = emporium_core::column::Def::new("k", "Key", "string");
+        let core = emporium_core::column::Def::new("k", "Key", "string").with_semantic("symbol");
         let wit: wit_types_full::ColumnDef = core.into();
         assert_eq!(wit.name, "k");
         assert_eq!(wit.alias, "Key");
         assert_eq!(wit.dtype, "string");
+        assert_eq!(wit.semantic.as_deref(), Some("symbol"));
+    }
+
+    #[test]
+    fn stale_protocol_detects_skew() {
+        // Same interface names at an older version → the version skew, so a
+        // 0.4.0 package is rejected with the protocol error, not a bare
+        // missing-interface list.
+        let missing = vec![
+            "emporium:extensions/extension@0.5.0".to_string(),
+            "emporium:extensions/tool-provider@0.5.0".to_string(),
+        ];
+        let actual = vec![
+            "emporium:extensions/extension@0.4.0".to_string(),
+            "emporium:extensions/tool-provider@0.4.0".to_string(),
+        ];
+        assert_eq!(stale_protocol_version(&missing, &actual).as_deref(), Some("0.4.0"));
+
+        // An interface absent outright is a genuinely missing export.
+        assert_eq!(stale_protocol_version(&missing, &actual[..1]), None);
     }
 
     #[test]

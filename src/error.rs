@@ -75,6 +75,21 @@ pub enum Error {
         missing: Vec<String>,
     },
 
+    /// The component was built against a different protocol version: it
+    /// exports the right interfaces for its world, but versioned at a
+    /// package version this host does not speak.
+    #[error(
+        "world {declared}: extension targets protocol {found}; this host requires {expected} (rebuild against the {expected} WIT)"
+    )]
+    ProtocolMismatch {
+        /// The world name declared by the manifest.
+        declared: String,
+        /// The package version the component's exports carry.
+        found: String,
+        /// The package version this host requires.
+        expected: String,
+    },
+
     /// The manifest declared a world this host does not yet support.
     #[error("unsupported world: {0}")]
     UnsupportedWorld(String),

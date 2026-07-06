@@ -66,7 +66,7 @@ pub struct ManifestDataSource {
 }
 
 /// A statically-declared output column on a [`ManifestDataSource`]. Mirrors the
-/// shared WIT `column-def` (`name`, `alias`, `dtype`).
+/// shared WIT `column-def` (`name`, `alias`, `dtype`, `semantic`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(export))]
@@ -74,4 +74,9 @@ pub struct ManifestColumn {
     pub name: String,
     pub alias: String,
     pub dtype: String,
+    /// Declared meaning of the column's values — a host-vocabulary wire
+    /// string (e.g. "url", "timestamp", "weather-code"). Unknown strings
+    /// are ignored by the host (forward tolerance), not an error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic: Option<String>,
 }

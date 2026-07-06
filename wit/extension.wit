@@ -1,6 +1,6 @@
 // Emporium provider-based extension interfaces.
 // VS Code style: five interfaces + four additive worlds.
-package emporium:extensions@0.4.0;
+package emporium:extensions@0.5.0;
 
 // ----------------------------------------------------------------------------
 // Shared types (referenced by multiple interfaces — both exports and imports).
@@ -14,6 +14,12 @@ interface types {
         name: string,
         alias: string,
         dtype: string,
+        // Declared meaning of the column's values, from the host's semantic
+        // vocabulary ("url", "image", "title", "snippet", "timestamp",
+        // "symbol", "value", "delta", "weather-code", "category"). The host
+        // types known strings and ignores unknown ones (forward tolerance),
+        // falling back to its own name heuristics when absent.
+        semantic: option<string>,
     }
 }
 
