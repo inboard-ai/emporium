@@ -21,7 +21,7 @@
 //!     .expect("rectangular columns");
 //! let (schema, arrow_ipc) = frame.into_parts();
 //! // Drop `arrow_ipc` into your generated `DataFrameOutput.arrow_ipc`, and map
-//! // `schema` into its `schema: Vec<ColumnDef>` (a 3-field copy).
+//! // `schema` into its `schema: Vec<ColumnDef>` (a field-for-field copy).
 //! ```
 //!
 //! A column's source [`Name`] and display [`Alias`] are **distinct newtypes**,
@@ -102,6 +102,22 @@ pub struct ColumnDef {
     pub alias: Alias,
     /// Host dtype tag: `string | number | integer | boolean | date`.
     pub dtype: String,
+    /// Declared meaning of the column's values — a host-vocabulary wire string
+    /// (e.g. "url", "timestamp", "delta", "weather-code"). The host types
+    /// known strings and ignores unknown ones (forward tolerance), falling
+    /// back to its own name heuristics when absent.
+    pub semantic: Option<String>,
+}
+
+impl ColumnDef {
+    /// Declare the column's semantic tag (a host-vocabulary wire string such
+    /// as "url" or "weather-code"). Mirrors `emporium_core::column::Def`'s
+    /// builder of the same name.
+    #[must_use]
+    pub fn with_semantic(mut self, semantic: impl Into<String>) -> Self {
+        self.semantic = Some(semantic.into());
+        self
+    }
 }
 
 /// Errors from building a [`Frame`].
@@ -231,6 +247,7 @@ impl FrameBuilder {
                 name,
                 alias,
                 dtype: dtype.to_string(),
+                semantic: None,
             },
             field,
             array,
@@ -519,6 +536,7 @@ mod tests {
             name: Name::new("d"),
             alias: Alias::new("D"),
             dtype: "date".into(),
+            semantic: None,
         }];
 
         // Every cell ISO → native Date32 (polars renders the dtype as "date").
@@ -542,11 +560,13 @@ mod tests {
                 name: Name::new("d"),
                 alias: Alias::new("D"),
                 dtype: "date".into(),
+                semantic: None,
             },
             ColumnDef {
                 name: Name::new("v"),
                 alias: Alias::new("V"),
                 dtype: "number".into(),
+                semantic: None,
             },
         ];
         let vals: Vec<f64> = (0..64).map(|i| 100.0 + i as f64 * 0.37 + 0.4).collect();
@@ -571,6 +591,7 @@ mod tests {
             name: Name::new("k"),
             alias: Alias::new("K"),
             dtype: "string".into(),
+            semantic: None,
         }];
         let cols = serde_json::json!({ "k": ["a", "b", "c"] });
         let df = from_arrow_ipc(&data_frame_ipc(&schema, &cols).unwrap()).unwrap();
