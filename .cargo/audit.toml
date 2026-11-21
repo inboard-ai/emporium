@@ -1,6 +1,10 @@
 [advisories]
-# No ignores: the wasmtime 44 bump cleared the whole 43.0-stack cluster
-# (rustls-webpki 0.102 cert/CRL advisories + the wasmtime-wasi path_open
-# TRUNCATE write-perm bypass). Keep this empty — add an entry only with a
-# tracked upstream rationale.
-ignore = []
+# Add an entry only with a tracked upstream rationale.
+ignore = [
+    # skiplist 0.6 is pinned by polars-compute 0.51 (rolling windows). Newer
+    # polars drops it, but polars 0.51 is shared with tatami-inmem and Veere
+    # so DataFrames cross crate boundaries; re-evaluate on the next polars bump.
+    "RUSTSEC-2026-0300",
+    "RUSTSEC-2026-0408",
+    "RUSTSEC-2026-0409",
+]
