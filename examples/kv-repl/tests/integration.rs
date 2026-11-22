@@ -52,7 +52,7 @@ async fn progress_event_fanned_out_to_subscribers() {
         .expect("register kv-keys");
 
     let bytes = std::fs::read(KV_EXTENSION_PATH).expect("read kv extension bytes");
-    let ext = Extension::from_bytes_with_data(&bytes, json!({}), registry)
+    let ext = Extension::from_bytes_with(&bytes, json!({}), emporium::Options::default().data(registry))
         .await
         .expect("load extension with host data");
 
@@ -362,7 +362,7 @@ async fn host_data_cursor_analyze_returns_computed_frequencies() {
         .expect("register kv-keys");
 
     let bytes = std::fs::read(KV_EXTENSION_PATH).expect("read kv extension bytes");
-    let ext = Extension::from_bytes_with_data(&bytes, json!({}), registry)
+    let ext = Extension::from_bytes_with(&bytes, json!({}), emporium::Options::default().data(registry))
         .await
         .expect("load extension with host data");
 
@@ -398,7 +398,7 @@ async fn host_data_cursor_add_and_analyze_returns_state_update_with_computed() {
         .expect("register kv-keys");
 
     let bytes = std::fs::read(KV_EXTENSION_PATH).expect("read kv extension bytes");
-    let ext = Extension::from_bytes_with_data(&bytes, json!({}), registry)
+    let ext = Extension::from_bytes_with(&bytes, json!({}), emporium::Options::default().data(registry))
         .await
         .expect("load extension with host data");
 
@@ -441,7 +441,7 @@ async fn host_data_cursor_empty_resource_yields_empty_frequencies() {
         .expect("register empty kv-keys");
 
     let bytes = std::fs::read(KV_EXTENSION_PATH).expect("read kv extension bytes");
-    let ext = Extension::from_bytes_with_data(&bytes, json!({}), registry)
+    let ext = Extension::from_bytes_with(&bytes, json!({}), emporium::Options::default().data(registry))
         .await
         .expect("load extension with host data");
 

@@ -10,9 +10,16 @@
 //! fire. A call that runs out of fuel traps and reports an error; a call
 //! that outlives its deadline stops the worker, and later calls report
 //! [`Error::ExtensionCrashed`](crate::Error::ExtensionCrashed).
+//!
+//! A host can send requests for named hosts somewhere else with [`Routes`]:
+//! a test points an extension's API host at a server in its own process,
+//! and a real host routes nothing.
 
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
+
+use http::uri::{Authority, Scheme};
 
 use wasmtime::{Config, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi_http::{RequestOptions, WasiBody, WasiHttpHooks};
@@ -64,11 +71,70 @@ impl Limits {
 /// How often, in fuel units, a running guest yields to the host executor.
 const YIELD_INTERVAL: u64 = 1_000_000;
 
+/// Where requests for named hosts go instead of the hosts themselves.
+///
+/// Each route replaces a request's scheme and authority and keeps its path
+/// and query, so an extension that always calls `https://<org host>/…`
+/// reaches `http://127.0.0.1:<port>/…` when its host is routed there. The
+/// network grant still applies: a routed request from an extension without
+/// it is denied.
+#[derive(Debug, Clone, Default)]
+pub struct Routes(Arc<Vec<Route>>);
+
+#[derive(Debug, Clone)]
+struct Route {
+    host: String,
+    scheme: Scheme,
+    authority: Authority,
+}
+
+impl Routes {
+    /// Also send requests for `host` to `origin`, an `http` or `https` URL
+    /// with no path, such as `http://127.0.0.1:8080`.
+    pub fn to(self, host: impl Into<String>, origin: &str) -> Result<Self, Error> {
+        let invalid = || Error::InvalidRoute(origin.to_owned());
+        let uri: http::Uri = origin.parse().map_err(|_| invalid())?;
+        let parts = uri.into_parts();
+        let scheme = parts.scheme.filter(|s| *s == Scheme::HTTP || *s == Scheme::HTTPS).ok_or_else(invalid)?;
+        let authority = parts.authority.ok_or_else(invalid)?;
+        if parts.path_and_query.is_some_and(|path| !matches!(path.as_str(), "" | "/")) {
+            return Err(invalid());
+        }
+        let mut routes = Arc::unwrap_or_clone(self.0);
+        routes.push(Route {
+            host: host.into().to_ascii_lowercase(),
+            scheme,
+            authority,
+        });
+        Ok(Self(Arc::new(routes)))
+    }
+
+    /// `request` sent where its host is routed, or unchanged.
+    fn apply<B>(&self, mut request: http::Request<B>) -> http::Request<B> {
+        let Some(route) = request
+            .uri()
+            .host()
+            .and_then(|host| self.0.iter().find(|route| route.host.eq_ignore_ascii_case(host)))
+        else {
+            return request;
+        };
+        let mut parts = request.uri().clone().into_parts();
+        parts.scheme = Some(route.scheme.clone());
+        parts.authority = Some(route.authority.clone());
+        match http::Uri::from_parts(parts) {
+            Ok(uri) => *request.uri_mut() = uri,
+            Err(error) => tracing::warn!(%error, host = route.host, "a routed request kept its address"),
+        }
+        request
+    }
+}
+
 /// The limits and grants for one extension, derived from its manifest.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct Sandbox {
     limits: Limits,
     network: bool,
+    routes: Routes,
 }
 
 impl Sandbox {
@@ -77,7 +143,13 @@ impl Sandbox {
         Self {
             limits,
             network: manifest.capabilities.get(NETWORK).copied().unwrap_or(false),
+            routes: Routes::default(),
         }
+    }
+
+    /// Send requests for routed hosts where `routes` says.
+    pub(crate) fn routed(self, routes: Routes) -> Self {
+        Self { routes, ..self }
     }
 
     /// Turn on the engine features the limits rely on.
@@ -92,7 +164,10 @@ impl Sandbox {
                 .memory_size(self.limits.memory)
                 .trap_on_grow_failure(true)
                 .build(),
-            network: Network { allowed: self.network },
+            network: Network {
+                allowed: self.network,
+                routes: self.routes.clone(),
+            },
         }
     }
 
@@ -135,9 +210,11 @@ impl Guard {
     }
 }
 
-/// WASI-HTTP hooks that send requests only for extensions granted network.
+/// WASI-HTTP hooks that send requests only for extensions granted network,
+/// where the host's routes say.
 pub(crate) struct Network {
     allowed: bool,
+    routes: Routes,
 }
 
 type Sent = Box<
@@ -157,6 +234,7 @@ impl WasiHttpHooks for Network {
         fut: Box<dyn Future<Output = wasmtime_wasi_http::Result<()>> + Send>,
     ) -> Sent {
         if self.allowed {
+            let request = self.routes.apply(request);
             return wasmtime_wasi_http::default_hooks().send_request(request, options, fut);
         }
         tracing::warn!(
@@ -273,12 +351,67 @@ mod tests {
 
     #[tokio::test]
     async fn requests_without_the_network_grant_are_denied() {
-        let mut network = Network { allowed: false };
+        let mut network = Network {
+            allowed: false,
+            routes: Routes::default().to("example.com", "http://127.0.0.1:9").unwrap(),
+        };
         let request = http::Request::builder()
             .uri("https://example.com/")
             .body(WasiBody::default())
             .unwrap();
         let sent = Box::into_pin(network.send_request(request, None, Box::new(async { Ok(()) })));
         assert!(matches!(sent.await, Err(wasmtime_wasi_http::Error::HttpRequestDenied)));
+    }
+
+    #[test]
+    fn routes_send_a_host_elsewhere_and_keep_the_path() {
+        let routes = Routes::default().to("Org.My.Salesforce.com", "http://127.0.0.1:8080").unwrap();
+        let request = |uri: &str| http::Request::builder().uri(uri).body(()).unwrap();
+        let routed = routes.apply(request("https://org.my.salesforce.com/services/data/v62.0/query?q=SELECT+Id"));
+        assert_eq!(
+            routed.uri().to_string(),
+            "http://127.0.0.1:8080/services/data/v62.0/query?q=SELECT+Id"
+        );
+        let other = routes.apply(request("https://login.salesforce.com/services/oauth2/token"));
+        assert_eq!(other.uri().to_string(), "https://login.salesforce.com/services/oauth2/token");
+        for origin in ["127.0.0.1:8080", "ftp://127.0.0.1", "http://127.0.0.1/api", "not a url"] {
+            assert!(Routes::default().to("x.test", origin).is_err(), "{origin} is not an origin");
+        }
+    }
+
+    /// A granted extension's request for a routed host reaches a server in
+    /// this process over plain HTTP, though it asked for HTTPS.
+    #[tokio::test]
+    async fn a_routed_request_reaches_a_local_server() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut seen = vec![0_u8; 4096];
+            let read = stream.read(&mut seen).await.unwrap();
+            let body = "{\"totalSize\":0}";
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(reply.as_bytes()).await.unwrap();
+            String::from_utf8_lossy(&seen[..read]).into_owned()
+        });
+
+        let mut network = Network {
+            allowed: true,
+            routes: Routes::default().to("org.my.salesforce.com", &origin).unwrap(),
+        };
+        let request = http::Request::builder()
+            .uri("https://org.my.salesforce.com/services/data/v62.0/query?q=x")
+            .body(WasiBody::default())
+            .unwrap();
+        let sent = Box::into_pin(network.send_request(request, None, Box::new(async { Ok(()) })));
+        let (response, _io) = sent.await.unwrap();
+        assert_eq!(response.status(), 200);
+        let seen = server.await.unwrap();
+        assert!(seen.starts_with("GET /services/data/v62.0/query?q=x HTTP/1.1"), "{seen}");
     }
 }

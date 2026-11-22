@@ -15,6 +15,7 @@ use tar::Archive;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::host_data::DataRegistry;
+use crate::sandbox::{Limits, Routes};
 use crate::manifest::{Manifest, RawManifest};
 use crate::wasm::{self, Request};
 use crate::{Error, ManifestTool, block, data, formula};
@@ -45,6 +46,34 @@ pub struct Extension {
     has_data: bool,
 }
 
+/// How a host runs an extension: the host data a `full-extension` can
+/// stream from, the sandbox's limits, and where its requests for routed
+/// hosts go. The default exposes no host data, applies the default
+/// [`Limits`] and routes nothing.
+#[derive(Clone, Default)]
+pub struct Options {
+    pub(crate) data: DataRegistry,
+    pub(crate) limits: Limits,
+    pub(crate) routes: Routes,
+}
+
+impl Options {
+    /// Expose `data` to an extension loaded against `full-extension`.
+    pub fn data(self, data: DataRegistry) -> Self {
+        Self { data, ..self }
+    }
+
+    /// Run the extension under `limits`.
+    pub fn limits(self, limits: Limits) -> Self {
+        Self { limits, ..self }
+    }
+
+    /// Send the extension's requests for routed hosts where `routes` say.
+    pub fn routes(self, routes: Routes) -> Self {
+        Self { routes, ..self }
+    }
+}
+
 /// Metadata captured from `extension::get-metadata` during init, kept on the
 /// Extension for cheap synchronous accessors.
 #[derive(Debug, Clone)]
@@ -56,44 +85,31 @@ struct CachedMetadata {
 }
 
 impl Extension {
-    /// Load an extension from a `.empkg` package file on disk. Uses an
-    /// empty host-data registry — callers that need to expose resources
-    /// to the extension should use [`Self::load_with_data`].
+    /// Load an extension from a `.empkg` package file on disk, with the
+    /// default [`Options`].
     pub async fn load(path: impl AsRef<Path>, config: serde_json::Value) -> Result<Self, Error> {
-        Self::load_with_data(path, config, DataRegistry::default()).await
+        Self::load_with(path, config, Options::default()).await
     }
 
-    /// Load an extension from pre-read package bytes. Uses an empty
-    /// host-data registry — see [`Self::from_bytes_with_data`] for the
-    /// host-data-enabled form.
+    /// Load an extension from pre-read package bytes, with the default
+    /// [`Options`].
     pub async fn from_bytes(bytes: &[u8], config: serde_json::Value) -> Result<Self, Error> {
-        Self::from_bytes_with_data(bytes, config, DataRegistry::default()).await
+        Self::from_bytes_with(bytes, config, Options::default()).await
     }
 
-    /// Load an extension from a `.empkg` file, providing a [`DataRegistry`]
-    /// that an extension loaded against `full-extension` can stream from.
-    pub async fn load_with_data(
-        path: impl AsRef<Path>,
-        config: serde_json::Value,
-        data: DataRegistry,
-    ) -> Result<Self, Error> {
+    /// Load an extension from a `.empkg` file, run as `options` say.
+    pub async fn load_with(path: impl AsRef<Path>, config: serde_json::Value, options: Options) -> Result<Self, Error> {
         let bytes = tokio::fs::read(path.as_ref()).await?;
-        Self::from_bytes_with_data(&bytes, config, data).await
+        Self::from_bytes_with(&bytes, config, options).await
     }
 
-    /// Load an extension from pre-read package bytes, providing a
-    /// [`DataRegistry`] that an extension loaded against `full-extension`
-    /// can stream from.
-    pub async fn from_bytes_with_data(
-        bytes: &[u8],
-        config: serde_json::Value,
-        data: DataRegistry,
-    ) -> Result<Self, Error> {
+    /// Load an extension from pre-read package bytes, run as `options` say.
+    pub async fn from_bytes_with(bytes: &[u8], config: serde_json::Value, options: Options) -> Result<Self, Error> {
         let (manifest, wasm_bytes) = extract_package(bytes)?;
         let manifest = Arc::new(manifest);
         let config_str = serde_json::to_string(&config)?;
 
-        let worker = wasm::spawn_worker(manifest.clone(), wasm_bytes, config_str, data).await?;
+        let worker = wasm::spawn_worker(manifest.clone(), wasm_bytes, config_str, options).await?;
 
         let metadata = CachedMetadata {
             id: worker.metadata.id,

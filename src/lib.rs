@@ -39,5 +39,5 @@ mod wasm;
 pub use discovery::{SearchIndex, SearchResult};
 pub use emporium_types::{ManifestColumn, ManifestDataSource, ManifestTool};
 pub use error::Error;
-pub use extension::Extension;
+pub use extension::{Extension, Options};
 pub use manifest::Manifest;

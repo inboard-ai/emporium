@@ -74,14 +74,28 @@ if let Some(formula) = ext.formula() {
 
 The `Extension` type is `Send + Sync + Clone` -- clones share the same worker thread via an `mpsc` channel, and the thread exits when the last clone drops.
 
-For host-data cursor support, use `Extension::load_with_data` and provide a `DataRegistry`:
+For host-data cursor support, use `Extension::load_with` and give its `Options` a `DataRegistry`:
 
 ```rust
+use emporium::Options;
 use emporium::host_data::DataRegistry;
 
 let registry = DataRegistry::new();
 registry.register("resource-id", schema, rows);
-let ext = Extension::load_with_data("ext.empkg", json!({}), registry).await?;
+let ext = Extension::load_with("ext.empkg", json!({}), Options::default().data(registry)).await?;
+```
+
+A test can send an extension's requests for its API host to a server in
+its own process with `Options::routes`. The route keeps the path and query
+and replaces the scheme and host, so an extension that always calls HTTPS
+reaches a plain-HTTP mock. Routed requests still need the manifest's
+`network` capability.
+
+```rust
+use emporium::sandbox::Routes;
+
+let routes = Routes::default().to("org.my.salesforce.com", "http://127.0.0.1:8080")?;
+let ext = Extension::load_with("salesforce.empkg", config, Options::default().routes(routes)).await?;
 ```
 
 ## Manifest v2 and tool discovery

@@ -80,7 +80,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .register(KV_KEYS_RESOURCE, kv_keys_schema(), &[])
         .expect("register empty kv-keys placeholder");
 
-    let ext = Extension::load_with_data(&path, json!({}), registry.clone()).await?;
+    let ext = Extension::load_with(&path, json!({}), emporium::Options::default().data(registry.clone())).await?;
 
     println!("Loaded: {} v{}", ext.id(), ext.version());
     println!("{}\n", ext.description());

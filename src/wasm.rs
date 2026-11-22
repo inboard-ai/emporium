@@ -559,7 +559,7 @@ pub(crate) async fn spawn_worker(
     manifest: Arc<Manifest>,
     wasm_bytes: Vec<u8>,
     config: String,
-    data: crate::host_data::DataRegistry,
+    options: crate::extension::Options,
 ) -> Result<Worker, Error> {
     let world = manifest.world().to_string();
     let route = match world.as_str() {
@@ -571,7 +571,8 @@ pub(crate) async fn spawn_worker(
         other => return Err(Error::UnsupportedWorld(other.to_string())),
     };
 
-    let sandbox = Sandbox::new(&manifest, sandbox::Limits::default());
+    let crate::extension::Options { data, limits, routes } = options;
+    let sandbox = Sandbox::new(&manifest, limits).routed(routes);
 
     let (meta_tx, meta_rx) = oneshot::channel::<Result<WorkerBootstrap, Error>>();
     let (req_tx, req_rx) = mpsc::unbounded_channel::<Request>();

@@ -48,6 +48,11 @@ pub enum Error {
     #[error("JSON error: {0}")]
     JsonError(Arc<serde_json::Error>),
 
+    /// A host route's origin is not an `http` or `https` URL without a
+    /// path.
+    #[error("Invalid route origin: {0}")]
+    InvalidRoute(String),
+
     /// The worker thread panicked before it could report its metadata.
     #[error("worker thread died during extension init")]
     ThreadDiedDuringInit,
