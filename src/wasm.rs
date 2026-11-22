@@ -17,6 +17,7 @@ use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
 
 use crate::Error;
 use crate::manifest::Manifest;
+use crate::sandbox::{self, Sandbox};
 
 /// WIT package namespace and identifier for the emporium extension interfaces.
 pub(crate) const WIT_PACKAGE: &str = "emporium:extensions";
@@ -364,13 +365,21 @@ pub(crate) enum Request {
 }
 
 /// Per-store state for wasmtime: WASI context, HTTP context, a resource
-/// table, the host-events broadcast sender, and the host-data registry.
+/// table, the host-events broadcast sender, the host-data registry, and the
+/// sandbox guard (memory limiter and network grant).
 pub(crate) struct State {
     wasi: WasiCtx,
     http: WasiHttpCtx,
     table: ResourceTable,
     events: broadcast::Sender<event::Event>,
     data: crate::host_data::DataRegistry,
+    guard: sandbox::Guard,
+}
+
+impl AsMut<sandbox::Guard> for State {
+    fn as_mut(&mut self) -> &mut sandbox::Guard {
+        &mut self.guard
+    }
 }
 
 impl WasiView for State {
@@ -387,7 +396,7 @@ impl WasiHttpView for State {
         WasiHttpCtxView {
             ctx: &mut self.http,
             table: &mut self.table,
-            hooks: Default::default(),
+            hooks: self.guard.network(),
         }
     }
 }
@@ -562,6 +571,8 @@ pub(crate) async fn spawn_worker(
         other => return Err(Error::UnsupportedWorld(other.to_string())),
     };
 
+    let sandbox = Sandbox::new(&manifest, sandbox::Limits::default());
+
     let (meta_tx, meta_rx) = oneshot::channel::<Result<WorkerBootstrap, Error>>();
     let (req_tx, req_rx) = mpsc::unbounded_channel::<Request>();
     let (event_tx, _) = broadcast::channel::<event::Event>(EVENT_CAPACITY);
@@ -580,6 +591,7 @@ pub(crate) async fn spawn_worker(
                 };
                 match route {
                     WorkerRoute::Tool => runtime.block_on(run_tool_worker(
+                        sandbox,
                         wasm_bytes,
                         config,
                         event_tx_thread,
@@ -588,6 +600,7 @@ pub(crate) async fn spawn_worker(
                         req_rx,
                     )),
                     WorkerRoute::Block => runtime.block_on(run_block_worker(
+                        sandbox,
                         wasm_bytes,
                         config,
                         event_tx_thread,
@@ -596,6 +609,7 @@ pub(crate) async fn spawn_worker(
                         req_rx,
                     )),
                     WorkerRoute::Rich => runtime.block_on(run_rich_worker(
+                        sandbox,
                         wasm_bytes,
                         config,
                         event_tx_thread,
@@ -604,6 +618,7 @@ pub(crate) async fn spawn_worker(
                         req_rx,
                     )),
                     WorkerRoute::Full => runtime.block_on(run_full_worker(
+                        sandbox,
                         wasm_bytes,
                         config,
                         event_tx_thread,
@@ -612,6 +627,7 @@ pub(crate) async fn spawn_worker(
                         req_rx,
                     )),
                     WorkerRoute::Data => runtime.block_on(run_data_worker(
+                        sandbox,
                         wasm_bytes,
                         config,
                         event_tx_thread,
@@ -669,6 +685,7 @@ struct WorkerBootstrap {
 /// tokio runtime. Performs the full bring-up then enters the request loop
 /// for the `tool-extension` world.
 async fn run_tool_worker(
+    sandbox: Sandbox,
     wasm_bytes: Vec<u8>,
     config: String,
     event_tx: broadcast::Sender<event::Event>,
@@ -677,7 +694,7 @@ async fn run_tool_worker(
     mut req_rx: mpsc::UnboundedReceiver<Request>,
 ) {
     // Fused init sequence: on any failure, send Err through meta_tx and exit.
-    let init = match initialize_tool(wasm_bytes, config, event_tx, data).await {
+    let init = match initialize_tool(&sandbox, wasm_bytes, config, event_tx, data).await {
         Ok(ok) => ok,
         Err(err) => {
             let _ = meta_tx.send(Err(err));
@@ -701,12 +718,20 @@ async fn run_tool_worker(
     }
 
     while let Some(request) = req_rx.recv().await {
-        handle_tool_request(request, &bindings, &mut store).await;
+        if let Err(error) = sandbox.refuel(&mut store) {
+            tracing::error!(%error, "extension worker could not refuel; stopping");
+            return;
+        }
+        if let Err(elapsed) = sandbox.call(handle_tool_request(request, &bindings, &mut store)).await {
+            tracing::error!(deadline = ?elapsed.0, "extension call outlived its deadline; stopping the worker");
+            return;
+        }
     }
 }
 
 /// The async body that runs the `block-extension` world worker.
 async fn run_block_worker(
+    sandbox: Sandbox,
     wasm_bytes: Vec<u8>,
     config: String,
     event_tx: broadcast::Sender<event::Event>,
@@ -714,7 +739,7 @@ async fn run_block_worker(
     meta_tx: oneshot::Sender<Result<WorkerBootstrap, Error>>,
     mut req_rx: mpsc::UnboundedReceiver<Request>,
 ) {
-    let init = match initialize_block(wasm_bytes, config, event_tx, data).await {
+    let init = match initialize_block(&sandbox, wasm_bytes, config, event_tx, data).await {
         Ok(ok) => ok,
         Err(err) => {
             let _ = meta_tx.send(Err(err));
@@ -737,12 +762,20 @@ async fn run_block_worker(
     }
 
     while let Some(request) = req_rx.recv().await {
-        handle_block_request(request, &bindings, &mut store).await;
+        if let Err(error) = sandbox.refuel(&mut store) {
+            tracing::error!(%error, "extension worker could not refuel; stopping");
+            return;
+        }
+        if let Err(elapsed) = sandbox.call(handle_block_request(request, &bindings, &mut store)).await {
+            tracing::error!(deadline = ?elapsed.0, "extension call outlived its deadline; stopping the worker");
+            return;
+        }
     }
 }
 
 /// The async body that runs the `rich-extension` world worker.
 async fn run_rich_worker(
+    sandbox: Sandbox,
     wasm_bytes: Vec<u8>,
     config: String,
     event_tx: broadcast::Sender<event::Event>,
@@ -750,7 +783,7 @@ async fn run_rich_worker(
     meta_tx: oneshot::Sender<Result<WorkerBootstrap, Error>>,
     mut req_rx: mpsc::UnboundedReceiver<Request>,
 ) {
-    let init = match initialize_rich(wasm_bytes, config, event_tx, data).await {
+    let init = match initialize_rich(&sandbox, wasm_bytes, config, event_tx, data).await {
         Ok(ok) => ok,
         Err(err) => {
             let _ = meta_tx.send(Err(err));
@@ -773,12 +806,20 @@ async fn run_rich_worker(
     }
 
     while let Some(request) = req_rx.recv().await {
-        handle_rich_request(request, &bindings, &mut store).await;
+        if let Err(error) = sandbox.refuel(&mut store) {
+            tracing::error!(%error, "extension worker could not refuel; stopping");
+            return;
+        }
+        if let Err(elapsed) = sandbox.call(handle_rich_request(request, &bindings, &mut store)).await {
+            tracing::error!(deadline = ?elapsed.0, "extension call outlived its deadline; stopping the worker");
+            return;
+        }
     }
 }
 
 /// The async body that runs the `full-extension` world worker.
 async fn run_full_worker(
+    sandbox: Sandbox,
     wasm_bytes: Vec<u8>,
     config: String,
     event_tx: broadcast::Sender<event::Event>,
@@ -786,7 +827,7 @@ async fn run_full_worker(
     meta_tx: oneshot::Sender<Result<WorkerBootstrap, Error>>,
     mut req_rx: mpsc::UnboundedReceiver<Request>,
 ) {
-    let init = match initialize_full(wasm_bytes, config, event_tx, data).await {
+    let init = match initialize_full(&sandbox, wasm_bytes, config, event_tx, data).await {
         Ok(ok) => ok,
         Err(err) => {
             let _ = meta_tx.send(Err(err));
@@ -809,12 +850,20 @@ async fn run_full_worker(
     }
 
     while let Some(request) = req_rx.recv().await {
-        handle_full_request(request, &bindings, &mut store).await;
+        if let Err(error) = sandbox.refuel(&mut store) {
+            tracing::error!(%error, "extension worker could not refuel; stopping");
+            return;
+        }
+        if let Err(elapsed) = sandbox.call(handle_full_request(request, &bindings, &mut store)).await {
+            tracing::error!(deadline = ?elapsed.0, "extension call outlived its deadline; stopping the worker");
+            return;
+        }
     }
 }
 
 /// The async body that runs the `data-extension` world worker.
 async fn run_data_worker(
+    sandbox: Sandbox,
     wasm_bytes: Vec<u8>,
     config: String,
     event_tx: broadcast::Sender<event::Event>,
@@ -822,7 +871,7 @@ async fn run_data_worker(
     meta_tx: oneshot::Sender<Result<WorkerBootstrap, Error>>,
     mut req_rx: mpsc::UnboundedReceiver<Request>,
 ) {
-    let init = match initialize_data(wasm_bytes, config, event_tx, data).await {
+    let init = match initialize_data(&sandbox, wasm_bytes, config, event_tx, data).await {
         Ok(ok) => ok,
         Err(err) => {
             let _ = meta_tx.send(Err(err));
@@ -845,7 +894,14 @@ async fn run_data_worker(
     }
 
     while let Some(request) = req_rx.recv().await {
-        handle_data_request(request, &bindings, &mut store).await;
+        if let Err(error) = sandbox.refuel(&mut store) {
+            tracing::error!(%error, "extension worker could not refuel; stopping");
+            return;
+        }
+        if let Err(elapsed) = sandbox.call(handle_data_request(request, &bindings, &mut store)).await {
+            tracing::error!(deadline = ?elapsed.0, "extension call outlived its deadline; stopping the worker");
+            return;
+        }
     }
 }
 
@@ -886,12 +942,13 @@ struct InitializedData {
 
 /// Compile, instantiate, `init`, and capture metadata for tool-extension.
 async fn initialize_tool(
+    sandbox: &Sandbox,
     wasm_bytes: Vec<u8>,
     config: String,
     event_tx: broadcast::Sender<event::Event>,
     data: crate::host_data::DataRegistry,
 ) -> Result<InitializedTool, Error> {
-    let (engine, component, mut store) = prepare_component(&wasm_bytes, event_tx, data)?;
+    let (engine, component, mut store) = prepare_component(sandbox, &wasm_bytes, event_tx, data)?;
 
     validate_world_exports(DEFAULT_WORLD, &engine, &component)?;
 
@@ -915,12 +972,13 @@ async fn initialize_tool(
 
 /// Compile, instantiate, `init`, and capture metadata for block-extension.
 async fn initialize_block(
+    sandbox: &Sandbox,
     wasm_bytes: Vec<u8>,
     config: String,
     event_tx: broadcast::Sender<event::Event>,
     data: crate::host_data::DataRegistry,
 ) -> Result<InitializedBlock, Error> {
-    let (engine, component, mut store) = prepare_component(&wasm_bytes, event_tx, data)?;
+    let (engine, component, mut store) = prepare_component(sandbox, &wasm_bytes, event_tx, data)?;
 
     validate_world_exports(BLOCK_WORLD, &engine, &component)?;
 
@@ -943,12 +1001,13 @@ async fn initialize_block(
 
 /// Compile, instantiate, `init`, and capture metadata for rich-extension.
 async fn initialize_rich(
+    sandbox: &Sandbox,
     wasm_bytes: Vec<u8>,
     config: String,
     event_tx: broadcast::Sender<event::Event>,
     data: crate::host_data::DataRegistry,
 ) -> Result<InitializedRich, Error> {
-    let (engine, component, mut store) = prepare_component(&wasm_bytes, event_tx, data)?;
+    let (engine, component, mut store) = prepare_component(sandbox, &wasm_bytes, event_tx, data)?;
 
     validate_world_exports(RICH_WORLD, &engine, &component)?;
 
@@ -971,12 +1030,13 @@ async fn initialize_rich(
 
 /// Compile, instantiate, `init`, and capture metadata for full-extension.
 async fn initialize_full(
+    sandbox: &Sandbox,
     wasm_bytes: Vec<u8>,
     config: String,
     event_tx: broadcast::Sender<event::Event>,
     data: crate::host_data::DataRegistry,
 ) -> Result<InitializedFull, Error> {
-    let (engine, component, mut store) = prepare_component(&wasm_bytes, event_tx, data)?;
+    let (engine, component, mut store) = prepare_component(sandbox, &wasm_bytes, event_tx, data)?;
 
     validate_world_exports(FULL_WORLD, &engine, &component)?;
 
@@ -999,12 +1059,13 @@ async fn initialize_full(
 
 /// Compile, instantiate, `init`, and capture metadata for data-extension.
 async fn initialize_data(
+    sandbox: &Sandbox,
     wasm_bytes: Vec<u8>,
     config: String,
     event_tx: broadcast::Sender<event::Event>,
     data: crate::host_data::DataRegistry,
 ) -> Result<InitializedData, Error> {
-    let (engine, component, mut store) = prepare_component(&wasm_bytes, event_tx, data)?;
+    let (engine, component, mut store) = prepare_component(sandbox, &wasm_bytes, event_tx, data)?;
 
     validate_world_exports(DATA_WORLD, &engine, &component)?;
 
@@ -1028,12 +1089,14 @@ async fn initialize_data(
 /// Compile the component and build the wasmtime store with shared WASI/HTTP
 /// + host-events context. Used by both world-specific initialization paths.
 fn prepare_component(
+    sandbox: &Sandbox,
     wasm_bytes: &[u8],
     event_tx: broadcast::Sender<event::Event>,
     data: crate::host_data::DataRegistry,
 ) -> Result<(Engine, Component, Store<State>), Error> {
     let mut cfg = Config::new();
     cfg.wasm_component_model(true);
+    sandbox.configure(&mut cfg);
     let engine = Engine::new(&cfg)?;
     let component = Component::new(&engine, wasm_bytes)?;
 
@@ -1044,8 +1107,10 @@ fn prepare_component(
         table: ResourceTable::new(),
         events: event_tx,
         data,
+        guard: sandbox.guard(),
     };
-    let store = Store::new(&engine, state);
+    let mut store = Store::new(&engine, state);
+    sandbox.arm(&mut store)?;
     Ok((engine, component, store))
 }
 

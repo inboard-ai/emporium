@@ -827,6 +827,7 @@ dependencies = [
  "emporium-core",
  "emporium-types",
  "flate2",
+ "http",
  "serde",
  "serde_json",
  "tar",

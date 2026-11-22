@@ -32,6 +32,7 @@ pub mod manifest;
 
 // Internal modules
 mod convert;
+pub mod sandbox;
 mod wasm;
 
 // Re-exports
