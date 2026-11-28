@@ -823,11 +823,13 @@ name = "emporium"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "bytes",
  "dotenvy",
  "emporium-core",
  "emporium-types",
  "flate2",
  "http",
+ "http-body-util",
  "serde",
  "serde_json",
  "tar",

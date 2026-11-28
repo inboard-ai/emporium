@@ -12,14 +12,19 @@
 //! [`Error::ExtensionCrashed`](crate::Error::ExtensionCrashed).
 //!
 //! A host can send requests for named hosts somewhere else with [`Routes`]:
-//! a test points an extension's API host at a server in its own process,
-//! and a real host routes nothing.
+//! a test points an extension's API host at a server in its own process.
+//! A host can also answer a named host's requests itself with an [`Answer`],
+//! so an extension reaches a service the host speaks to on its behalf
+//! without the extension holding that service's credential.
 
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use http::uri::{Authority, Scheme};
+use http_body_util::BodyExt;
 
 use wasmtime::{Config, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi_http::{RequestOptions, WasiBody, WasiHttpHooks};
@@ -71,21 +76,46 @@ impl Limits {
 /// How often, in fuel units, a running guest yields to the host executor.
 const YIELD_INTERVAL: u64 = 1_000_000;
 
+/// A host's answer to an extension's request for a named host, made in the
+/// host's own process instead of over the network.
+///
+/// The request arrives with its whole body read, and the answer goes back to
+/// the extension as the response it receives.
+pub trait Answer: Send + Sync {
+    /// Answer `request`.
+    fn answer(&self, request: http::Request<Bytes>) -> Pin<Box<dyn Future<Output = http::Response<Bytes>> + Send>>;
+}
+
 /// Where requests for named hosts go instead of the hosts themselves.
 ///
 /// Each route replaces a request's scheme and authority and keeps its path
 /// and query, so an extension that always calls `https://<org host>/…`
-/// reaches `http://127.0.0.1:<port>/…` when its host is routed there. The
-/// network grant still applies: a routed request from an extension without
-/// it is denied.
-#[derive(Debug, Clone, Default)]
+/// reaches `http://127.0.0.1:<port>/…` when its host is routed there. A host
+/// can instead answer a named host itself ([`Routes::answered`]). The
+/// network grant still applies: a routed or answered request from an
+/// extension without it is denied.
+#[derive(Clone, Default)]
 pub struct Routes(Arc<Vec<Route>>);
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for Routes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.0.iter().map(|route| &route.host)).finish()
+    }
+}
+
+#[derive(Clone)]
 struct Route {
     host: String,
-    scheme: Scheme,
-    authority: Authority,
+    target: Target,
+}
+
+/// Where a routed host's requests go.
+#[derive(Clone)]
+enum Target {
+    /// Another origin, over the network.
+    Origin { scheme: Scheme, authority: Authority },
+    /// The host's own answer.
+    Answered(Arc<dyn Answer>),
 }
 
 impl Routes {
@@ -95,35 +125,55 @@ impl Routes {
         let invalid = || Error::InvalidRoute(origin.to_owned());
         let uri: http::Uri = origin.parse().map_err(|_| invalid())?;
         let parts = uri.into_parts();
-        let scheme = parts.scheme.filter(|s| *s == Scheme::HTTP || *s == Scheme::HTTPS).ok_or_else(invalid)?;
+        let scheme = parts
+            .scheme
+            .filter(|s| *s == Scheme::HTTP || *s == Scheme::HTTPS)
+            .ok_or_else(invalid)?;
         let authority = parts.authority.ok_or_else(invalid)?;
-        if parts.path_and_query.is_some_and(|path| !matches!(path.as_str(), "" | "/")) {
+        if parts
+            .path_and_query
+            .is_some_and(|path| !matches!(path.as_str(), "" | "/"))
+        {
             return Err(invalid());
         }
-        let mut routes = Arc::unwrap_or_clone(self.0);
-        routes.push(Route {
-            host: host.into().to_ascii_lowercase(),
-            scheme,
-            authority,
-        });
-        Ok(Self(Arc::new(routes)))
+        Ok(self.with(host.into(), Target::Origin { scheme, authority }))
     }
 
-    /// `request` sent where its host is routed, or unchanged.
+    /// Also answer requests for `host` with `answer`, in this process.
+    pub fn answered(self, host: impl Into<String>, answer: Arc<dyn Answer>) -> Self {
+        self.with(host.into(), Target::Answered(answer))
+    }
+
+    fn with(self, host: String, target: Target) -> Self {
+        let mut routes = Arc::unwrap_or_clone(self.0);
+        routes.push(Route {
+            host: host.to_ascii_lowercase(),
+            target,
+        });
+        Self(Arc::new(routes))
+    }
+
+    /// Where `request`'s host is routed, if anywhere.
+    fn target<B>(&self, request: &http::Request<B>) -> Option<&Target> {
+        let host = request.uri().host()?;
+        self.0
+            .iter()
+            .find(|route| route.host.eq_ignore_ascii_case(host))
+            .map(|route| &route.target)
+    }
+
+    /// `request` sent where its host is routed, or unchanged. An answered
+    /// host keeps its address, since no request for it leaves the process.
     fn apply<B>(&self, mut request: http::Request<B>) -> http::Request<B> {
-        let Some(route) = request
-            .uri()
-            .host()
-            .and_then(|host| self.0.iter().find(|route| route.host.eq_ignore_ascii_case(host)))
-        else {
+        let Some(Target::Origin { scheme, authority }) = self.target(&request) else {
             return request;
         };
         let mut parts = request.uri().clone().into_parts();
-        parts.scheme = Some(route.scheme.clone());
-        parts.authority = Some(route.authority.clone());
+        parts.scheme = Some(scheme.clone());
+        parts.authority = Some(authority.clone());
         match http::Uri::from_parts(parts) {
             Ok(uri) => *request.uri_mut() = uri,
-            Err(error) => tracing::warn!(%error, host = route.host, "a routed request kept its address"),
+            Err(error) => tracing::warn!(%error, "a routed request kept its address"),
         }
         request
     }
@@ -234,6 +284,9 @@ impl WasiHttpHooks for Network {
         fut: Box<dyn Future<Output = wasmtime_wasi_http::Result<()>> + Send>,
     ) -> Sent {
         if self.allowed {
+            if let Some(Target::Answered(answer)) = self.routes.target(&request) {
+                return answered(answer.clone(), request);
+            }
             let request = self.routes.apply(request);
             return wasmtime_wasi_http::default_hooks().send_request(request, options, fut);
         }
@@ -243,6 +296,22 @@ impl WasiHttpHooks for Network {
         );
         Box::new(async { Err(wasmtime_wasi_http::Error::HttpRequestDenied) })
     }
+}
+
+/// `request`, read whole, answered by `answer` in this process.
+fn answered(answer: Arc<dyn Answer>, request: http::Request<WasiBody>) -> Sent {
+    Box::new(async move {
+        let (parts, body) = request.into_parts();
+        let body = body.collect().await?.to_bytes();
+        let response = answer.answer(http::Request::from_parts(parts, body)).await;
+        let response = response.map(|body| {
+            http_body_util::Full::new(body)
+                .map_err(|never| match never {})
+                .boxed_unsync()
+        });
+        let io: Box<dyn Future<Output = wasmtime_wasi_http::Result<()>> + Send> = Box::new(async { Ok(()) });
+        Ok((response, io))
+    })
 }
 
 #[cfg(test)]
@@ -365,17 +434,27 @@ mod tests {
 
     #[test]
     fn routes_send_a_host_elsewhere_and_keep_the_path() {
-        let routes = Routes::default().to("Org.My.Salesforce.com", "http://127.0.0.1:8080").unwrap();
+        let routes = Routes::default()
+            .to("Org.My.Salesforce.com", "http://127.0.0.1:8080")
+            .unwrap();
         let request = |uri: &str| http::Request::builder().uri(uri).body(()).unwrap();
-        let routed = routes.apply(request("https://org.my.salesforce.com/services/data/v62.0/query?q=SELECT+Id"));
+        let routed = routes.apply(request(
+            "https://org.my.salesforce.com/services/data/v62.0/query?q=SELECT+Id",
+        ));
         assert_eq!(
             routed.uri().to_string(),
             "http://127.0.0.1:8080/services/data/v62.0/query?q=SELECT+Id"
         );
         let other = routes.apply(request("https://login.salesforce.com/services/oauth2/token"));
-        assert_eq!(other.uri().to_string(), "https://login.salesforce.com/services/oauth2/token");
+        assert_eq!(
+            other.uri().to_string(),
+            "https://login.salesforce.com/services/oauth2/token"
+        );
         for origin in ["127.0.0.1:8080", "ftp://127.0.0.1", "http://127.0.0.1/api", "not a url"] {
-            assert!(Routes::default().to("x.test", origin).is_err(), "{origin} is not an origin");
+            assert!(
+                Routes::default().to("x.test", origin).is_err(),
+                "{origin} is not an origin"
+            );
         }
     }
 
@@ -412,6 +491,53 @@ mod tests {
         let (response, _io) = sent.await.unwrap();
         assert_eq!(response.status(), 200);
         let seen = server.await.unwrap();
-        assert!(seen.starts_with("GET /services/data/v62.0/query?q=x HTTP/1.1"), "{seen}");
+        assert!(
+            seen.starts_with("GET /services/data/v62.0/query?q=x HTTP/1.1"),
+            "{seen}"
+        );
+    }
+
+    /// Echoes the path and body it was asked for.
+    struct Echo;
+
+    impl Answer for Echo {
+        fn answer(&self, request: http::Request<Bytes>) -> Pin<Box<dyn Future<Output = http::Response<Bytes>> + Send>> {
+            let reply = format!("{} {}", request.uri().path(), String::from_utf8_lossy(request.body()));
+            Box::pin(async move { http::Response::builder().status(201).body(Bytes::from(reply)).unwrap() })
+        }
+    }
+
+    /// An answered host's request never leaves the process: the host's
+    /// answer reads its path and body, and the extension receives the reply.
+    #[tokio::test]
+    async fn an_answered_host_is_answered_in_process() {
+        let mut network = Network {
+            allowed: true,
+            routes: Routes::default().answered("shared.invalid", Arc::new(Echo)),
+        };
+        let body = http_body_util::Full::new(Bytes::from_static(b"{\"limit\":5}"))
+            .map_err(|never| match never {})
+            .boxed_unsync();
+        let request = http::Request::builder()
+            .method("POST")
+            .uri("https://shared.invalid/json/2/res.company/search_read")
+            .body(body)
+            .unwrap();
+        let sent = Box::into_pin(network.send_request(request, None, Box::new(async { Ok(()) })));
+        let (response, _io) = sent.await.unwrap();
+        assert_eq!(response.status(), 201);
+        let reply = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&reply[..], b"/json/2/res.company/search_read {\"limit\":5}");
+
+        let mut denied = Network {
+            allowed: false,
+            routes: Routes::default().answered("shared.invalid", Arc::new(Echo)),
+        };
+        let request = http::Request::builder()
+            .uri("https://shared.invalid/")
+            .body(WasiBody::default())
+            .unwrap();
+        let sent = Box::into_pin(denied.send_request(request, None, Box::new(async { Ok(()) })));
+        assert!(matches!(sent.await, Err(wasmtime_wasi_http::Error::HttpRequestDenied)));
     }
 }
